@@ -134,6 +134,38 @@ autosk workflow create --file docs/examples/workflows/workflow-example.json
 autosk workflow install @your-org/workflows --workflow feature-dev
 ```
 
+#### Canonical definitions and global registry foundation
+
+Workflow definitions are canonicalized before they are hashed or stored
+outside a project DB. Canonical JSON normalizes defaults (including
+`isolation: "none"`), sorts step names, preserves authored transition
+order, and treats empty `agent.params` arrays as absent. The canonical
+SHA-256 digest is the stable `definition_hash` used by registry and
+provenance records.
+
+Global workflow definitions live outside any one project under a
+workflow prefix resolved in this order:
+
+1. `$AUTOSK_WORKFLOWS`
+2. `$XDG_DATA_HOME/autosk/workflows`
+3. `$HOME/.autosk/workflows`
+
+The prefix contains a `registry.json` file plus canonical definition
+files under `definitions/<definition_hash>.json`. Registry entries keep
+the workflow name, definition hash/file, optional source and revision
+metadata, enabled state, and install/update timestamps. Loading a
+registry entry validates that the stored file's workflow name and
+canonical hash still match `registry.json`, so stale or tampered files
+fail loudly instead of silently substituting another workflow.
+
+Project databases also keep a `workflow_origins` row for imported or
+seeded workflows. The row records source type/path, source metadata,
+canonical definition hash, revision, active state, and timestamps; it is
+deleted automatically when the workflow row is deleted. This is the
+foundation for global workflow reuse and provenance tracking — the
+current user-facing import commands remain `autosk workflow create` and
+`autosk workflow install`.
+
 #### Shipped default: `feature-dev-generic`
 
 `autosk init` seeds one workflow into every new project so users can

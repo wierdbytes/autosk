@@ -17,6 +17,16 @@ workflows:
 - first_setp (fk:steps->id)
 - description
 
+workflow_origins:
+- workflow_id (pk/fk:workflows->id, cascade delete)
+- source_type
+- source
+- source_metadata (JSON text, nullable)
+- definition_hash (canonical workflow definition SHA-256)
+- revision
+- active (0/1, default 1)
+- created_at / updated_at (unix seconds)
+
 steps:
 - id
 - agent_id (fk:agents->id)
