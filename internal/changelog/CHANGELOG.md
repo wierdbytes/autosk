@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
+- **daemon:** skip blocked `work` tasks until all blockers are `done` or `cancel`.
 
 ## [0.1.5] — 2026-05-25
 
