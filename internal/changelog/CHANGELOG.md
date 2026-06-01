@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
+- **lazy:** preserve Detail pane scroll when the live job input overlay is visible, and keep the tail visible when that overlay appears.
 
 ## [0.1.5] — 2026-05-25
 
