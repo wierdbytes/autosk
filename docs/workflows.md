@@ -770,12 +770,12 @@ new | work | human | done | cancel
 
 Every spelling is ≤ 7 chars so the persisted columns stay tight and
 the TUI doesn't need to truncate. (`claimed` is gone — replaced by
-`enroll --agent`. `blocked` is still **not** a stored status: it's
-derived from open blocker edges.) The legacy spellings
-(`in_workflow`, `human_feedback`, `cancelled`) are not accepted on
-any input surface (CLI flags, YAML/JSON workflow definitions, the
-autosk_task / autosk_step JSON-RPC SDK). They were rewritten
-in-place by a one-shot migration; see
+`enroll --agent`; `blocked` remains derived, not stored.) A blocker edge
+keeps the dependent blocked until the blocker reaches `done` or `cancel`.
+The legacy spellings (`in_workflow`, `human_feedback`, `cancelled`) are
+not accepted on any input surface (CLI flags, YAML/JSON workflow
+definitions, the autosk_task / autosk_step JSON-RPC SDK). They were
+rewritten in-place by a one-shot migration; see
 [`docs/plans/20260521-Short-Statuses.md`](plans/20260521-Short-Statuses.md).
 
 A SQL CHECK ties `status = 'work'` to `current_step_id IS NOT
@@ -1046,6 +1046,14 @@ SELECT t.id, t.current_step_id
   JOIN agents a  ON s.agent_id        = a.id
  WHERE t.status = 'work'
    AND a.is_human = 0
+   AND NOT EXISTS (
+     SELECT 1
+       FROM task_deps d
+       JOIN tasks b ON b.id = d.blocker_id
+      WHERE d.blocked_id = t.id
+        AND d.kind = 'blocks'
+        AND b.status NOT IN ('done','cancel')
+   )
    AND NOT EXISTS (
      SELECT 1 FROM daemon_runs r
      WHERE r.task_id = t.id AND r.status IN ('queued','running')

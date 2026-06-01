@@ -73,7 +73,7 @@ func (s *Store) Ready(ctx context.Context, limit int) ([]store.Task, error) {
 		         SELECT 1 FROM task_deps d
 		           JOIN tasks b ON b.id = d.blocker_id
 		          WHERE d.blocked_id = t.id
-		            AND b.status IN ('new','work','human'))
+		            AND b.status NOT IN ('done','cancel'))
 		ORDER BY t.priority ASC, t.created_at ASC`
 	args := []any{}
 	if limit > 0 {

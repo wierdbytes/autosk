@@ -195,6 +195,72 @@ func TestPoller_Dedupes(t *testing.T) {
 	}
 }
 
+// TestPoller_SkipsBlockedWorkTaskUntilBlockerTerminal verifies that a task
+// already enrolled into work is not enqueued until all blockers are terminal.
+func TestPoller_SkipsBlockedWorkTaskUntilBlockerTerminal(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      store.Status
+		wantBlocked bool
+		wantPicked  bool
+	}{
+		{name: "new", status: store.StatusNew, wantBlocked: true},
+		{name: "work", status: store.StatusWork, wantBlocked: true},
+		{name: "human", status: store.StatusHuman, wantBlocked: true},
+		{name: "done", status: store.StatusDone, wantPicked: true},
+		{name: "cancel", status: store.StatusCancel, wantPicked: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPollFixture(t)
+			defer fx.close()
+			ctx := context.Background()
+
+			targetID := fx.makeTask(t, "Enrolled but blocked", "dev")
+			var blockerID string
+			if tc.status == store.StatusWork {
+				blockerID = fx.makeTask(t, "Work blocker", "dev")
+			} else {
+				blocker, err := fx.ts.CreateTask(ctx, store.Task{
+					Title:    "Blocker " + tc.name,
+					Status:   tc.status,
+					Priority: 2,
+				})
+				if err != nil {
+					t.Fatalf("CreateTask blocker: %v", err)
+				}
+				blockerID = blocker.ID
+			}
+			if err := fx.ts.Block(ctx, targetID, blockerID); err != nil {
+				t.Fatalf("Block: %v", err)
+			}
+
+			blocked, err := fx.ts.IsBlocked(ctx, targetID)
+			if err != nil {
+				t.Fatalf("IsBlocked: %v", err)
+			}
+			if blocked != tc.wantBlocked {
+				t.Fatalf("IsBlocked = %v, want %v", blocked, tc.wantBlocked)
+			}
+
+			p := poller.New(fx.ts.DB(), fx.runs, nil, poller.Config{ProjectKey: "proj-test"})
+			cands, err := p.Scan(ctx)
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			picked := false
+			for _, c := range cands {
+				if c.TaskID == targetID {
+					picked = true
+				}
+			}
+			if picked != tc.wantPicked {
+				t.Fatalf("target picked = %v, want %v (candidates=%v)", picked, tc.wantPicked, cands)
+			}
+		})
+	}
+}
+
 // TestPoller_SkipsHumanAgent: a task whose current step's agent is human
 // must NOT be enqueued.
 func TestPoller_SkipsHumanAgent(t *testing.T) {

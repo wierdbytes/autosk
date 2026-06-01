@@ -19,8 +19,8 @@ import (
 // docs/plans/20260521-Short-Statuses.md for the rename rationale.
 //
 // "blocked" is NOT a stored status. A task is blocked iff it has at least
-// one open blocker edge whose blocker is in {new, work, human}; this is
-// computed by Ready and by GetTask consumers.
+// one blocker edge whose blocker has not reached a terminal status
+// (done|cancel); this is computed by Ready and by GetTask consumers.
 type Status string
 
 const (
@@ -46,8 +46,7 @@ func AllStatuses() []Status {
 }
 
 // OpenStatuses returns the statuses that count as "open work" — the
-// default filter for `autosk list` and the set that keeps a task blocking
-// its dependents.
+// default filter for `autosk list`.
 func OpenStatuses() []Status {
 	return []Status{StatusNew, StatusWork, StatusHuman}
 }
@@ -191,11 +190,11 @@ type Store interface {
 	Deps(ctx context.Context, id string) (incoming, outgoing []string, err error)
 
 	// IsBlocked is the derived `blocked` flag: true iff id has at least one
-	// incoming blocker edge whose blocker's status is in {new, work, human}.
+	// incoming blocker edge whose blocker is not terminal (done|cancel).
 	IsBlocked(ctx context.Context, id string) (bool, error)
 
-	// Ready returns tasks where status='new' AND no open blocker (open =
-	// blocker in {new, work, human}). Sorted priority ASC, created_at ASC.
+	// Ready returns tasks where status='new' AND every incoming blocker is
+	// terminal (done|cancel). Sorted priority ASC, created_at ASC.
 	Ready(ctx context.Context, limit int) ([]Task, error)
 
 	// Raw passthrough for `autosk sql`. Implementations may refuse writes

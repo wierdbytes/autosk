@@ -136,8 +136,9 @@ func (s *Store) Deps(ctx context.Context, id string) (incoming, outgoing []strin
 	return incoming, outgoing, nil
 }
 
-// IsBlocked reports whether id has any open blocker (status in new|claimed).
-// Used by the show command to populate the derived `blocked` flag.
+// IsBlocked reports whether id has any non-terminal blocker. Only
+// done/cancel blockers release their dependents; every other blocker status
+// continues to block.
 func (s *Store) IsBlocked(ctx context.Context, id string) (bool, error) {
 	if s.db == nil {
 		return false, store.ErrNotOpen
@@ -149,7 +150,7 @@ func (s *Store) IsBlocked(ctx context.Context, id string) (bool, error) {
 		  JOIN tasks b ON b.id = d.blocker_id
 		 WHERE d.blocked_id = ?
 		   AND d.kind = 'blocks'
-		   AND b.status IN ('new','claimed')
+		   AND b.status NOT IN ('done','cancel')
 		 LIMIT 1`, id).Scan(&x)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil

@@ -113,7 +113,7 @@ Tasks live in `.autosk/db` inside your repo. Each one has:
 - A **status**: `new` (open work), `work` (an agent is on it), `human` (waiting for a person to process it), `done`, or `cancel`.
 - Optional **blockers** — `autosk block <id> <blocker-id>` makes a task wait for another.
 
-`autosk ready` returns the *ready set*: tasks in `new` status with no open blocker. That's what humans and agents pull from.
+`autosk ready` returns the *ready set*: tasks in `new` status whose blockers are all terminal (`done` / `cancel`). That's what humans and agents pull from.
 
 ### Agents
 

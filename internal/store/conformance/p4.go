@@ -172,6 +172,16 @@ func testReadyExcludesBlockedByOpen(t *testing.T, f Factory) {
 	if len(got) != 1 || got[0].ID != a.ID {
 		t.Fatalf("ready should be [a] only; got %v", taskIDs(got))
 	}
+	// Parking a for human input is still non-terminal, so b stays blocked.
+	setStatus(t, s, a.ID, store.StatusHuman)
+	got, err = s.Ready(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ready should be empty while a is human; got %v", taskIDs(got))
+	}
+
 	// Now close a → b becomes ready.
 	setStatus(t, s, a.ID, store.StatusDone)
 	got, err = s.Ready(ctx, 0)
@@ -233,6 +243,15 @@ func testIsBlocked(t *testing.T, f Factory) {
 	}
 	if blocked {
 		t.Fatal("a should not be blocked")
+	}
+	// Human is still non-terminal, so b remains blocked.
+	setStatus(t, s, a.ID, store.StatusHuman)
+	blocked, err = s.IsBlocked(ctx, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !blocked {
+		t.Fatal("want b blocked while a is human")
 	}
 	// Closing a flips b to not blocked, but edge remains.
 	setStatus(t, s, a.ID, store.StatusDone)
