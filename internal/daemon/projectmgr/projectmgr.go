@@ -29,6 +29,7 @@ import (
 	"autosk/internal/daemon/runstore"
 	"autosk/internal/daemon/scheduler"
 
+	"autosk/internal/pathcanon"
 	"autosk/internal/projectdb"
 	"autosk/internal/step"
 	"autosk/internal/store/doltlite"
@@ -165,9 +166,9 @@ func (m *Manager) Resolve(ctx context.Context, cwd, dbOverride string) (*Project
 	}
 	// Canonical root is the directory containing .autosk/ (== parent of .autosk/db's parent).
 	rawRoot := filepath.Dir(filepath.Dir(dbPath))
-	canonRoot, cerr := filepath.EvalSymlinks(rawRoot)
+	canonRoot, cerr := pathcanon.Existing(rawRoot)
 	if cerr != nil {
-		// If the root cannot be EvalSymlinked (e.g. permissions), fall
+		// If the root cannot be canonicalised (e.g. permissions), fall
 		// back to the lexical clean — still deterministic per request.
 		canonRoot = filepath.Clean(rawRoot)
 	}

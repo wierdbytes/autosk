@@ -2,6 +2,8 @@ package worktree_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"os/exec"
@@ -21,7 +23,10 @@ func gitProject(t *testing.T) string {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed; skipping worktree tests")
 	}
-	dir := t.TempDir()
+	dir := filepath.Join(t.TempDir(), "ProjectRoot")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir project root: %v", err)
+	}
 	mustRun(t, dir, "git", "init", "--initial-branch=main")
 	mustRun(t, dir, "git", "config", "user.email", "test@autosk.local")
 	mustRun(t, dir, "git", "config", "user.name", "autosk test")
@@ -438,6 +443,257 @@ func TestEnsure_PathOccupied(t *testing.T) {
 	if !errors.Is(err, worktree.ErrPathOccupied) {
 		t.Fatalf("want ErrPathOccupied, got %v", err)
 	}
+}
+
+func TestPathFor_CaseInsensitiveAliasSameSlug(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+
+	a, err := worktree.PathFor(root, "ask-case01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := worktree.PathFor(alias, "ask-case01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("case aliases produced different paths:\nroot:  %s\nalias: %s", a, b)
+	}
+}
+
+func TestVerify_CaseInsensitiveProjectAlias(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+
+	if _, err := mgr.Ensure(ctx, root, "ask-case02", ""); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if err := mgr.Verify(ctx, alias, "ask-case02"); err != nil {
+		t.Fatalf("Verify through case alias: %v", err)
+	}
+}
+
+func TestEnsure_MigratesLegacyCaseAliasWorktree(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-legacy01"
+	legacy := legacyPathFor(t, alias, taskID)
+	canonical, err := worktree.PathFor(root, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy == canonical {
+		t.Skip("legacy and canonical paths match on this filesystem")
+	}
+	mustRun(t, root, "git", "worktree", "add", legacy, "-b", worktree.BranchFor(taskID))
+
+	res, err := mgr.Ensure(ctx, root, taskID, "main")
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if !res.Existing || !res.BaseRefIgnored {
+		t.Fatalf("expected migrated existing worktree with base ref ignored, got %+v", res)
+	}
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical worktree missing after migration: %v", err)
+	}
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy worktree should have moved away, stat err=%v", err)
+	}
+}
+
+func TestVerify_MigratesLegacyCaseAliasWorktree(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-legacy02"
+	legacy := legacyPathFor(t, alias, taskID)
+	canonical, err := worktree.PathFor(root, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy == canonical {
+		t.Skip("legacy and canonical paths match on this filesystem")
+	}
+	mustRun(t, root, "git", "worktree", "add", legacy, "-b", worktree.BranchFor(taskID))
+
+	if err := mgr.Verify(ctx, root, taskID); err != nil {
+		t.Fatalf("Verify should migrate legacy worktree: %v", err)
+	}
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical worktree missing after Verify migration: %v", err)
+	}
+}
+
+func TestVerify_LegacyMigrationSerialisesConcurrentCalls(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-legacy03"
+	legacy := legacyPathFor(t, alias, taskID)
+	canonical, err := worktree.PathFor(root, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy == canonical {
+		t.Skip("legacy and canonical paths match on this filesystem")
+	}
+	mustRun(t, root, "git", "worktree", "add", legacy, "-b", worktree.BranchFor(taskID))
+
+	const n = 4
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- mgr.Verify(ctx, root, taskID)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Verify: %v", err)
+		}
+	}
+	if _, err := os.Stat(canonical); err != nil {
+		t.Fatalf("canonical worktree missing after concurrent Verify: %v", err)
+	}
+}
+
+func TestVerify_PrunesMissingLegacyCaseAliasWorktree(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	alias := caseAlias(t, root)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-legacy04"
+	legacy := legacyPathFor(t, alias, taskID)
+	canonical, err := worktree.PathFor(root, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy == canonical {
+		t.Skip("legacy and canonical paths match on this filesystem")
+	}
+	mustRun(t, root, "git", "worktree", "add", legacy, "-b", worktree.BranchFor(taskID))
+	if err := os.RemoveAll(legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	err = mgr.Verify(ctx, root, taskID)
+	if !errors.Is(err, worktree.ErrWorktreeMissing) {
+		t.Fatalf("want ErrWorktreeMissing after pruning stale legacy entry, got %v", err)
+	}
+	if _, err := os.Stat(canonical); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical worktree should not be created by Verify after stale prune, stat err=%v", err)
+	}
+}
+
+func TestEnsure_DoesNotMoveExternalBranchWorktree(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-external01"
+	external := filepath.Join(t.TempDir(), "HumanWorktree")
+	mustRun(t, root, "git", "worktree", "add", external, "-b", worktree.BranchFor(taskID))
+
+	_, err := mgr.Ensure(ctx, root, taskID, "")
+	if !errors.Is(err, worktree.ErrBranchCheckedOutElsewhere) {
+		t.Fatalf("want ErrBranchCheckedOutElsewhere, got %v", err)
+	}
+	if _, err := os.Stat(external); err != nil {
+		t.Fatalf("external worktree should remain in place: %v", err)
+	}
+	canonical, _ := worktree.PathFor(root, taskID)
+	if _, err := os.Stat(canonical); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical worktree should not be created, stat err=%v", err)
+	}
+}
+
+func TestOnTerminal_DoesNotRemoveExternalBranchWorktree(t *testing.T) {
+	isolateHome(t)
+	root := gitProject(t)
+	mgr := worktree.NewManager()
+	ctx := context.Background()
+	taskID := "ask-external02"
+	external := filepath.Join(t.TempDir(), "HumanWorktree")
+	mustRun(t, root, "git", "worktree", "add", external, "-b", worktree.BranchFor(taskID))
+
+	_, err := mgr.OnTerminal(ctx, root, taskID)
+	if !errors.Is(err, worktree.ErrBranchCheckedOutElsewhere) {
+		t.Fatalf("want ErrBranchCheckedOutElsewhere, got %v", err)
+	}
+	if _, err := os.Stat(external); err != nil {
+		t.Fatalf("external worktree should remain in place: %v", err)
+	}
+}
+
+func caseAlias(t *testing.T, path string) string {
+	t.Helper()
+	base := filepath.Base(path)
+	aliasBase := toggleCase(base)
+	if aliasBase == base {
+		t.Fatalf("test setup needs alphabetic project root basename, got %q", base)
+	}
+	alias := filepath.Join(filepath.Dir(path), aliasBase)
+	origInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat original path: %v", err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil || !os.SameFile(origInfo, aliasInfo) {
+		t.Skipf("filesystem is case-sensitive for %q", path)
+	}
+	return alias
+}
+
+func toggleCase(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case 'a' <= r && r <= 'z':
+			b.WriteRune(r - 'a' + 'A')
+		case 'A' <= r && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func legacyPathFor(t *testing.T, projectRoot, taskID string) string {
+	t.Helper()
+	abs, err := filepath.Abs(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canon, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		canon = filepath.Clean(abs)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(canon))
+	slug := filepath.Base(canon) + "-" + hex.EncodeToString(sum[:4])
+	return filepath.Join(home, ".autosk", "worktrees", slug, taskID)
 }
 
 func mustOutput(t *testing.T, cwd, name string, args ...string) string {

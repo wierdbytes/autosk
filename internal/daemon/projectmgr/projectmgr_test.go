@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -64,7 +65,7 @@ func newManagerWithSched(t *testing.T) (*projectmgr.Manager, *scheduler.Schedule
 // projectdb.Resolve walks up and finds it), and returns the project root.
 func initProject(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "ProjectRoot")
 	dir := filepath.Join(root, ".autosk")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -201,6 +202,62 @@ func TestResolve_CanonicalisesSymlinks(t *testing.T) {
 	if p1 != p2 {
 		t.Fatalf("expected same *Project, got %p and %p (roots %q vs %q)", p1, p2, p1.Root, p2.Root)
 	}
+}
+
+func TestResolve_DedupesCaseInsensitiveAliases(t *testing.T) {
+	mgr, _, cleanup := newManagerWithSched(t)
+	defer cleanup()
+	root := initProject(t)
+	alias := caseAlias(t, root)
+
+	p1, err := mgr.Resolve(context.Background(), root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := mgr.Resolve(context.Background(), alias, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1 != p2 {
+		t.Fatalf("expected case aliases to resolve same *Project, got %p and %p (roots %q vs %q)", p1, p2, p1.Root, p2.Root)
+	}
+	if loaded := mgr.Loaded(); len(loaded) != 1 {
+		t.Fatalf("Loaded() = %d, want 1", len(loaded))
+	}
+}
+
+func caseAlias(t *testing.T, path string) string {
+	t.Helper()
+	base := filepath.Base(path)
+	aliasBase := toggleCase(base)
+	if aliasBase == base {
+		t.Fatalf("test setup needs alphabetic project root basename, got %q", base)
+	}
+	alias := filepath.Join(filepath.Dir(path), aliasBase)
+	origInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat original path: %v", err)
+	}
+	aliasInfo, err := os.Stat(alias)
+	if err != nil || !os.SameFile(origInfo, aliasInfo) {
+		t.Skipf("filesystem is case-sensitive for %q", path)
+	}
+	return alias
+}
+
+func toggleCase(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case 'a' <= r && r <= 'z':
+			b.WriteRune(r - 'a' + 'A')
+		case 'A' <= r && r <= 'Z':
+			b.WriteRune(r - 'A' + 'a')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func TestResolve_RestartRecoverySweepsOnFirstOpen(t *testing.T) {

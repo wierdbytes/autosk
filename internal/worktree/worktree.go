@@ -47,6 +47,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"autosk/internal/pathcanon"
 )
 
 // Manager wraps the mutating git-worktree verbs.
@@ -92,11 +94,12 @@ type Result struct {
 // Sentinel errors. Callers test with errors.Is — implementations may
 // wrap them with extra context.
 var (
-	ErrNotGitRepo       = errors.New("worktree: project root is not a git repo")
-	ErrGitMissing       = errors.New("worktree: git binary not found on PATH")
-	ErrPathOccupied     = errors.New("worktree: target path exists and is not a registered worktree")
-	ErrWorktreeMissing  = errors.New("worktree: directory missing on disk")
-	ErrWorktreeStranded = errors.New("worktree: .git does not point at the project's gitdir")
+	ErrNotGitRepo                = errors.New("worktree: project root is not a git repo")
+	ErrGitMissing                = errors.New("worktree: git binary not found on PATH")
+	ErrPathOccupied              = errors.New("worktree: target path exists and is not a registered worktree")
+	ErrWorktreeMissing           = errors.New("worktree: directory missing on disk")
+	ErrWorktreeStranded          = errors.New("worktree: .git does not point at the project's gitdir")
+	ErrBranchCheckedOutElsewhere = errors.New("worktree: branch is checked out in a non-autosk worktree")
 )
 
 // manager is the default Manager implementation. Per-task locking
@@ -180,6 +183,30 @@ func (m *manager) Ensure(ctx context.Context, projectRoot, taskID, baseRef strin
 		// Ensure the parent dir actually exists (defensive — should be
 		// true if registered is true) and return.
 		return res, nil
+	}
+
+	if legacy, found, err := worktreeRegisteredForBranch(ctx, canon, branch); err != nil {
+		return res, err
+	} else if found {
+		if !autoskManagedWorktreePath(legacy.Path, taskID) {
+			return res, fmt.Errorf("%w: %s at %s", ErrBranchCheckedOutElsewhere, branch, legacy.Path)
+		}
+		if _, statErr := os.Stat(legacy.Path); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				_, _ = runGit(ctx, canon, "worktree", "prune")
+			} else {
+				return res, fmt.Errorf("worktree: stat legacy path %s: %w", legacy.Path, statErr)
+			}
+		} else {
+			if err := moveRegisteredWorktree(ctx, canon, legacy.Path, path); err != nil {
+				return res, err
+			}
+			res.Existing = true
+			if strings.TrimSpace(baseRef) != "" {
+				res.BaseRefIgnored = true
+			}
+			return res, nil
+		}
 	}
 
 	// Path occupied by something that isn't a registered worktree → hard
@@ -283,6 +310,26 @@ func (m *manager) OnTerminal(ctx context.Context, projectRoot, taskID string) (R
 		return res, nil
 	}
 
+	if legacy, found, err := worktreeRegisteredForBranch(ctx, canon, res.Branch); err != nil {
+		return res, err
+	} else if found {
+		if !autoskManagedWorktreePath(legacy.Path, taskID) {
+			return res, fmt.Errorf("%w: %s at %s", ErrBranchCheckedOutElsewhere, res.Branch, legacy.Path)
+		}
+		if _, statErr := os.Stat(legacy.Path); statErr != nil {
+			if errors.Is(statErr, os.ErrNotExist) {
+				_, _ = runGit(ctx, canon, "worktree", "prune")
+				return res, nil
+			}
+			return res, fmt.Errorf("worktree: stat legacy path %s: %w", legacy.Path, statErr)
+		}
+		if out, gerr := runGit(ctx, canon, "worktree", "remove", "--force", legacy.Path); gerr != nil {
+			return res, gitErr("worktree remove legacy", gerr, out)
+		}
+		res.Existed = true
+		return res, nil
+	}
+
 	// Not registered. The path may still exist (e.g. user manually
 	// removed the worktree from git but left files behind). Remove it
 	// best-effort; absent is fine.
@@ -311,21 +358,45 @@ func (m *manager) Verify(ctx context.Context, projectRoot, taskID string) error 
 	if err != nil {
 		return err
 	}
+	unlock := m.lock(canon, taskID)
+	defer unlock()
+
 	path, err := PathFor(canon, taskID)
 	if err != nil {
 		return err
 	}
 	if _, statErr := os.Stat(path); statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
-			return fmt.Errorf("%w: %s", ErrWorktreeMissing, path)
+			branch := BranchFor(taskID)
+			legacy, found, lerr := worktreeRegisteredForBranch(ctx, canon, branch)
+			if lerr != nil {
+				return lerr
+			}
+			if !found {
+				return fmt.Errorf("%w: %s", ErrWorktreeMissing, path)
+			}
+			if !autoskManagedWorktreePath(legacy.Path, taskID) {
+				return fmt.Errorf("%w: %s at %s", ErrBranchCheckedOutElsewhere, branch, legacy.Path)
+			}
+			if _, legacyStatErr := os.Stat(legacy.Path); legacyStatErr != nil {
+				if errors.Is(legacyStatErr, os.ErrNotExist) {
+					_, _ = runGit(ctx, canon, "worktree", "prune")
+					return fmt.Errorf("%w: %s", ErrWorktreeMissing, path)
+				}
+				return fmt.Errorf("%w: stat %s: %v", ErrWorktreeStranded, legacy.Path, legacyStatErr)
+			}
+			if err := moveRegisteredWorktree(ctx, canon, legacy.Path, path); err != nil {
+				return err
+			}
+		} else {
+			// Any other stat failure (EACCES, dangling symlink, etc.) is a
+			// stranded worktree from the operator's point of view: the
+			// directory is *there* on disk in some form, we just can't
+			// safely use it. Wrap the sentinel so the executor's mapping
+			// labels the run "worktree_stranded" rather than the misleading
+			// "worktree_missing".
+			return fmt.Errorf("%w: stat %s: %v", ErrWorktreeStranded, path, statErr)
 		}
-		// Any other stat failure (EACCES, dangling symlink, etc.) is a
-		// stranded worktree from the operator's point of view: the
-		// directory is *there* on disk in some form, we just can't
-		// safely use it. Wrap the sentinel so the executor's mapping
-		// labels the run "worktree_stranded" rather than the misleading
-		// "worktree_missing".
-		return fmt.Errorf("%w: stat %s: %v", ErrWorktreeStranded, path, statErr)
 	}
 	// Resolve the worktree's gitdir.
 	wtGitDir, gerr := gitCommonDirFrom(ctx, path)
@@ -363,16 +434,9 @@ func (m *manager) lock(canon, taskID string) func() {
 // is the load-bearing helper that keeps every caller computing the
 // same slug for the same project.
 func canonRoot(projectRoot string) (string, error) {
-	abs, err := filepath.Abs(projectRoot)
+	canon, err := pathcanon.Existing(projectRoot)
 	if err != nil {
-		return "", fmt.Errorf("worktree: absolutise %q: %w", projectRoot, err)
-	}
-	canon, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		// Permission denied or missing path: fall back to the lexical
-		// clean. Same convention as projectmgr uses on canonicalisation
-		// failures.
-		canon = filepath.Clean(abs)
+		return "", fmt.Errorf("worktree: canonicalise %q: %w", projectRoot, err)
 	}
 	return canon, nil
 }
@@ -422,28 +486,114 @@ func branchExists(ctx context.Context, canon, branch string) (bool, error) {
 	return true, nil
 }
 
+type registeredWorktree struct {
+	Path   string
+	Branch string
+}
+
 // worktreeRegisteredAt parses `git worktree list --porcelain` looking
 // for a `worktree <path>` line that matches the canonical target path.
 func worktreeRegisteredAt(ctx context.Context, canon, target string) (bool, error) {
-	out, err := runGit(ctx, canon, "worktree", "list", "--porcelain")
+	entries, err := listRegisteredWorktrees(ctx, canon)
 	if err != nil {
-		return false, gitErr("worktree list", err, out)
+		return false, err
 	}
-	canonTarget, _ := filepath.EvalSymlinks(target)
+	canonTarget, _ := pathcanon.Existing(target)
 	if canonTarget == "" {
 		canonTarget = filepath.Clean(target)
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "worktree ") {
-			continue
-		}
-		p := strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
-		if sameDir(p, target) || sameDir(p, canonTarget) {
+	for _, entry := range entries {
+		if sameDir(entry.Path, target) || sameDir(entry.Path, canonTarget) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func worktreeRegisteredForBranch(ctx context.Context, canon, branch string) (registeredWorktree, bool, error) {
+	entries, err := listRegisteredWorktrees(ctx, canon)
+	if err != nil {
+		return registeredWorktree{}, false, err
+	}
+	ref := "refs/heads/" + branch
+	for _, entry := range entries {
+		if entry.Branch == ref || entry.Branch == branch {
+			return entry, true, nil
+		}
+	}
+	return registeredWorktree{}, false, nil
+}
+
+func listRegisteredWorktrees(ctx context.Context, canon string) ([]registeredWorktree, error) {
+	out, err := runGit(ctx, canon, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, gitErr("worktree list", err, out)
+	}
+	var entries []registeredWorktree
+	var cur registeredWorktree
+	flush := func() {
+		if cur.Path != "" {
+			entries = append(entries, cur)
+			cur = registeredWorktree{}
+		}
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			flush()
+			continue
+		}
+		if strings.HasPrefix(line, "worktree ") {
+			flush()
+			cur.Path = strings.TrimSpace(strings.TrimPrefix(line, "worktree "))
+			continue
+		}
+		if strings.HasPrefix(line, "branch ") {
+			cur.Branch = strings.TrimSpace(strings.TrimPrefix(line, "branch "))
+		}
+	}
+	flush()
+	return entries, nil
+}
+
+func moveRegisteredWorktree(ctx context.Context, canon, from, to string) error {
+	if sameDir(from, to) {
+		return nil
+	}
+	if _, statErr := os.Stat(to); statErr == nil {
+		return fmt.Errorf("%w: %s", ErrPathOccupied, to)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("worktree: stat %s: %w", to, statErr)
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+		return fmt.Errorf("worktree: mkdir %s: %w", filepath.Dir(to), err)
+	}
+	if out, gerr := runGit(ctx, canon, "worktree", "move", from, to); gerr != nil {
+		return gitErr("worktree move", gerr, out)
+	}
+	return nil
+}
+
+func autoskManagedWorktreePath(path, taskID string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	root := filepath.Join(home, ".autosk", "worktrees")
+	canonRoot, err := pathcanon.Existing(root)
+	if err != nil {
+		canonRoot = filepath.Clean(root)
+	}
+	canonPath, err := pathcanon.Existing(path)
+	if err != nil {
+		canonPath = filepath.Clean(path)
+	}
+	rel, err := filepath.Rel(canonRoot, canonPath)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+		return false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	return len(parts) == 2 && parts[0] != "" && parts[1] == taskID
 }
 
 // gitCommonDirFrom asks git for the absolute common-dir of the repo
@@ -463,18 +613,16 @@ func gitCommonDirFrom(ctx context.Context, cwd string) (string, error) {
 	if !filepath.IsAbs(raw) {
 		abs = filepath.Join(cwd, raw)
 	}
-	// Resolve symlinks so the comparison in Verify is stable.
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+	if resolved, rerr := pathcanon.Existing(abs); rerr == nil {
 		abs = resolved
 	}
 	return filepath.Clean(abs), nil
 }
 
-// sameDir is a forgiving directory-path comparison: we filepath.Clean
-// both sides and compare lexically. Used in places where one path was
-// captured at canonicalisation time and the other came back from git.
+// sameDir is a forgiving directory-path comparison for paths that may
+// differ by symlink spelling or by case-insensitive aliases.
 func sameDir(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
+	return pathcanon.SameDir(a, b)
 }
 
 // runGit runs `git -C <cwd> <args>` and captures combined output. Used
