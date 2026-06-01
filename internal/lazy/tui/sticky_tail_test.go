@@ -93,6 +93,48 @@ func TestStickyTail_FirstFrame_StartsAtBottom(t *testing.T) {
 	}
 }
 
+// TestStickyTail_LiveOverlayVisible_ManualScrollUpPreserved pins the
+// live-job overlay regression: once winJobInput is already visible,
+// a one-line manual scroll-up must survive the next redraw instead
+// of being classified as sticky by the full, overlay-covered height.
+func TestStickyTail_LiveOverlayVisible_ManualScrollUpPreserved(t *testing.T) {
+	gu := newHeadlessGui(t, 80, 40)
+	v, err := gu.g.SetView(winDetail, 0, 0, 79, 30, 0)
+	if err != nil && !isUnknownView(err) {
+		t.Fatalf("SetView detail: %v", err)
+	}
+	if v == nil {
+		t.Fatal("SetView returned nil")
+	}
+	v.Frame = true
+	if _, err := gu.g.SetView(winJobInput, 5, 25, 75, 29, 0); err != nil && !isUnknownView(err) {
+		t.Fatalf("SetView jobInput: %v", err)
+	}
+
+	body := strings.Repeat("line\n", 100)
+	gu.writeViewSticky(winDetail, "", body)
+	effH := gu.detailEffectiveInnerH()
+	lineCount := viewBufferLineCount(v)
+	wantBottom := lineCount - effH
+	_, oy := v.Origin()
+	if oy != wantBottom {
+		t.Fatalf("setup: expected overlay bottom anchor at oy=%d, got %d (lineCount=%d effH=%d)", wantBottom, oy, lineCount, effH)
+	}
+
+	// Simulate the operator scrolling Detail up by only one line while
+	// the live-job input overlay is visible. The old threshold used the
+	// full inner height, so oy+fullH still reached the tail and the next
+	// live redraw yanked the viewport back down.
+	ox, _ := v.Origin()
+	v.SetOrigin(ox, wantBottom-1)
+	want := wantBottom - 1
+	gu.writeViewSticky(winDetail, "", body)
+	_, oy = v.Origin()
+	if oy != want {
+		t.Errorf("sticky-tail clobbered one-line manual scroll above live overlay; oy=%d want %d", oy, want)
+	}
+}
+
 // TestStickyTail_OverlayAppears_TailStaysVisible pins the
 // SUBSTANTIVE regression review flagged: when the winJobInput
 // overlay appears between frames (e.g. the cursor moves from a
@@ -107,8 +149,8 @@ func TestStickyTail_FirstFrame_StartsAtBottom(t *testing.T) {
 // (overlay-less) viewport, but the new effective height makes
 // the check fail, leaving the overlay covering the rows they
 // were just reading. The fix is to compute beforeSticky against
-// the full InnerSize() and use the effective height only for the
-// post-write target.
+// the full InnerSize() only on the overlay-appears frame and use
+// the effective height for the post-write target.
 func TestStickyTail_OverlayAppears_TailStaysVisible(t *testing.T) {
 	gu := newHeadlessGui(t, 80, 40)
 	// Create winDetail at a known size. Inner height ~ 28.

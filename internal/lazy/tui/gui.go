@@ -127,6 +127,14 @@ type Gui struct {
 	// event arrivals. Read & written only from the gocui main
 	// goroutine (same as bodyCache), so no mutex is needed.
 	lastDetailKey string
+
+	// lastDetailOverlay records whether winJobInput existed during
+	// the previous winDetail writeViewSticky pass. Sticky-tail uses it
+	// to distinguish "overlay just appeared while the operator was at
+	// the old full-height bottom" from "overlay was already visible
+	// and the operator manually scrolled up inside the smaller visible
+	// region".
+	lastDetailOverlay bool
 }
 
 // bodyCacheEntry is one entry in Gui.bodyCache: the body string,
@@ -1091,20 +1099,21 @@ func viewBufferLineCount(v *gocui.View) int {
 // sticky-tail there would break the wheel-scroll-keeps-its-place
 // affordance.
 //
-// For winDetail the at-bottom check uses the FULL inner height
-// (v.InnerSize), not detailEffectiveInnerH; the post-write target
-// uses detailEffectiveInnerH.
+// For winDetail the at-bottom check uses the effective visible
+// height while winJobInput is already present, so a small manual
+// scroll-up above the overlay is respected on the next live redraw.
+// The post-write target also uses detailEffectiveInnerH.
 //
-// The split matters when the winJobInput overlay APPEARS between
-// frames (e.g. a queued job promotes to running; or the selection
-// crosses into a non-terminal row from a terminal one). The user
-// was "at the bottom" of the previous viewport — with the overlay
-// absent, the full inner height was visible. Using the new
-// (smaller) effective inner height for the threshold would
-// mis-classify them as "scrolled up" and the overlay would silently
-// hide the last few rows of content they were just looking at.
-// Using the full inner height for the threshold preserves the
-// at-bottom anchor across the overlay-appears transition.
+// The exception is the frame where winJobInput APPEARS (e.g. a
+// queued job promotes to running; or the selection crosses into a
+// non-terminal row from a terminal one). The user was "at the
+// bottom" of the previous viewport — with the overlay absent, the
+// full inner height was visible. Using the new (smaller) effective
+// inner height for that first threshold would mis-classify them as
+// "scrolled up" and the overlay would silently hide the last few
+// rows of content they were just looking at. Using the full inner
+// height for the overlay-appears threshold preserves the at-bottom
+// anchor across that transition.
 func (gu *Gui) writeViewSticky(name, title, body string) {
 	v, err := gu.g.View(name)
 	if err != nil || v == nil {
@@ -1112,13 +1121,19 @@ func (gu *Gui) writeViewSticky(name, title, body string) {
 	}
 	// Snapshot the BEFORE state before writeView's potential clear.
 	ox, oy := v.Origin()
-	// Threshold uses the FULL inner height (overlay-agnostic): we want
-	// to know whether the user was at the bottom of the underlying
-	// content viewport regardless of whether an overlay is/was/will-be
-	// covering some of it.
 	_, fullH := v.InnerSize()
 	if fullH < 1 {
 		fullH = 1
+	}
+	detailOverlayVisible := false
+	if name == winDetail {
+		if _, err := gu.g.View(winJobInput); err == nil {
+			detailOverlayVisible = true
+		}
+	}
+	thresholdH := fullH
+	if name == winDetail && detailOverlayVisible && gu.lastDetailOverlay {
+		thresholdH = gu.detailEffectiveInnerH()
 	}
 	// prevLines comes from the bodyCache when available — that's
 	// the line count writeView stamped after the last actual write.
@@ -1133,14 +1148,17 @@ func (gu *Gui) writeViewSticky(name, title, body string) {
 		prevLines = viewBufferLineCount(v)
 	}
 	// First frame OR user is at (or past) the bottom → sticky.
-	// `oy + fullH >= prevLines` is true exactly when the visible
-	// region [oy, oy+fullH) already covers the last line index
+	// `oy + thresholdH >= prevLines` is true exactly when the visible
+	// region [oy, oy+thresholdH) already covers the last line index
 	// (prevLines-1). Using prevLines as a true line count (rather
 	// than the off-by-one newline count) is required for both this
 	// predicate AND the post-write target below.
-	beforeSticky := prevLines == 0 || oy+fullH >= prevLines
+	beforeSticky := prevLines == 0 || oy+thresholdH >= prevLines
 
 	gu.writeView(name, title, body)
+	if name == winDetail {
+		gu.lastDetailOverlay = detailOverlayVisible
+	}
 
 	if !beforeSticky {
 		return
