@@ -49,7 +49,7 @@ func TestApply_FreshDB_AppliesInitialMigration(t *testing.T) {
 	// Every release-schema table is present.
 	tables := scanTableSet(t, ctx, db)
 	for _, want := range []string{
-		"agents", "workflows", "steps", "step_transitions",
+		"agents", "workflows", "steps", "step_transitions", "workflow_origins",
 		"tasks", "task_deps", "comments",
 		"daemon_runs", "step_signals",
 		"schema_migrations",
