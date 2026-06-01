@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
+- **worktree:** dedupe case-insensitive project path aliases and safely reuse legacy autosk task worktrees instead of reporting them as stranded.
 
 ## [0.1.5] — 2026-05-25
 
