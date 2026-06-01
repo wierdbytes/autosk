@@ -24,11 +24,10 @@ import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import type {
   CliResult,
-  PiResult,
-  PiSpawnOpts,
   RunAgent,
   RunContext,
 } from "@autosk/agent-sdk";
+import { createSpawnPi } from "./pi.js";
 
 /** Bumped on breaking changes to the seed JSON shape. Matches
  * SeedSchemaVersion on the Go side. */
@@ -106,26 +105,7 @@ function buildContext(seed: RunContextSeed): RunContext {
     }
   };
 
-  const spawnPi = (opts: PiSpawnOpts): Promise<PiResult> =>
-    new Promise((resolve, reject) => {
-      const args: string[] = ["--mode", "rpc"];
-      if (opts.model) args.push("--model", opts.model);
-      if (opts.thinking) args.push("--thinking", opts.thinking);
-      for (const e of opts.extensions ?? []) args.push("-e", e);
-      for (const s of opts.skills ?? []) args.push("--skill", s);
-      if (opts.extraArgs) args.push(...opts.extraArgs);
-      const child = spawn(piBin, args, {
-        cwd,
-        env,
-        stdio: ["pipe", "inherit", "inherit"],
-      });
-      if (opts.firstMessage) {
-        child.stdin?.write(opts.firstMessage + "\n");
-      }
-      child.stdin?.end();
-      child.on("error", reject);
-      child.on("close", (code) => resolve({ exitCode: code ?? -1 }));
-    });
+  const spawnPi = createSpawnPi({ cwd, env, piBin });
 
   return {
     task: seed.task,

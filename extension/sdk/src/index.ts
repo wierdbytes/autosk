@@ -85,6 +85,14 @@ export interface PiSpawnOpts {
 
 export interface PiResult {
   exitCode: number;
+  /** Tail of the spawned pi stdout JSONL stream, capped by the runtime. */
+  stdout?: string;
+  /** Tail of the spawned pi stderr stream, capped by the runtime. */
+  stderr?: string;
+  /** Diagnosable failure summary when the subprocess/protocol failed. */
+  error?: string;
+  /** Whether an `agent_end` event was observed for the submitted prompt. */
+  agentEnd?: boolean;
 }
 
 /**

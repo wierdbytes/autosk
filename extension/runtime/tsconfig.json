@@ -9,7 +9,8 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "declaration": false,
-    "rootDir": "./src"
+    "rootDir": "./src",
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"]
 }
