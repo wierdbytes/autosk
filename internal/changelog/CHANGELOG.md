@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **agent SDK:** expose spawned pi diagnostics on `PiResult` (`stdout`, `stderr`, `error`, and `agentEnd`).
+
 ### Changed
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
 
 ### Fixed
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
+- **extension runtime:** send `spawnPi` first messages through the `pi --mode rpc` prompt handshake and report missing `agent_end` / stderr diagnostics instead of silently treating failed runs as success.
 
 ## [0.1.5] — 2026-05-25
 
