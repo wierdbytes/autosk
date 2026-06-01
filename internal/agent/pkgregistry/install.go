@@ -96,6 +96,27 @@ func (r *Registry) Install(ctx context.Context, name, version string) (Entry, er
 // caller's `name` must match the on-disk `package.json#name`, otherwise
 // the install is rejected (and rolled out of the registry).
 func (r *Registry) InstallSpec(ctx context.Context, name, spec string) (Entry, error) {
+	return r.installSpec(ctx, name, spec, func(name string) error {
+		_, err := r.Resolve(name)
+		return err
+	})
+}
+
+// InstallWorkflowSpec installs a package that is expected to declare at
+// least one autosk.workflow bundle. Unlike InstallSpec, autosk.agent is
+// optional; if present it is validated so the CLI can register it in the
+// project DB safely.
+func (r *Registry) InstallWorkflowSpec(ctx context.Context, name, spec string) (Entry, error) {
+	return r.installSpec(ctx, name, spec, func(name string) error {
+		if _, err := r.ResolveWorkflows(name); err != nil {
+			return err
+		}
+		_, _, err := r.ResolveAgentIfPresent(name)
+		return err
+	})
+}
+
+func (r *Registry) installSpec(ctx context.Context, name, spec string, validate func(string) error) (Entry, error) {
 	if err := validatePkgName(name); err != nil {
 		return Entry{}, err
 	}
@@ -115,7 +136,7 @@ func (r *Registry) InstallSpec(ctx context.Context, name, spec string) (Entry, e
 	}
 	entry := Entry{Name: name, Version: installed, InstalledAt: time.Now().UTC()}
 
-	// Tentatively register so Resolve can find the row.
+	// Tentatively register so Resolve helpers can find the row.
 	f, err := r.readRegistry()
 	if err != nil {
 		return Entry{}, err
@@ -125,7 +146,7 @@ func (r *Registry) InstallSpec(ctx context.Context, name, spec string) (Entry, e
 	if err := r.writeRegistry(f); err != nil {
 		return Entry{}, err
 	}
-	if _, rerr := r.Resolve(name); rerr != nil {
+	if rerr := validate(name); rerr != nil {
 		// Roll back the registry change (but not the npm install — npm
 		// state is shared and may have other consumers).
 		if hadPrev {

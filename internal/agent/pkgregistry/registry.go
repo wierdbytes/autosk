@@ -165,9 +165,11 @@ func (r *Registry) Get(name string) (Entry, error) {
 	return e, nil
 }
 
-// Has reports whether the named package is registered.
+// Has reports whether the named package is registered as a valid
+// autosk agent package. This method is used as agent.PackageResolver;
+// workflow-only packages in the registry must not satisfy agent FKs.
 func (r *Registry) Has(name string) bool {
-	_, err := r.Get(name)
+	_, err := r.Resolve(name)
 	return err == nil
 }
 

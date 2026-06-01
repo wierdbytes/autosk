@@ -184,6 +184,34 @@ func TestParseFile_AgentParams_InlinesFirstMessageFile(t *testing.T) {
 	}
 }
 
+func TestParseFile_AgentParams_RejectsEscapingFirstMessageFile(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(dir, "secret.md")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wfDir := filepath.Join(dir, "workflows")
+	if err := os.MkdirAll(wfDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	wfBody := `{
+		"name": "x", "first_step": "a",
+		"steps": {
+			"a": {
+				"agent": {"name": "dev", "params": {"first_message_file": "../secret.md"}},
+				"next_steps": [{"task_status": "done", "prompt_rule": "."}]
+			}
+		}}`
+	wfPath := filepath.Join(wfDir, "wf.json")
+	if err := os.WriteFile(wfPath, []byte(wfBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := workflow.ParseFile(wfPath)
+	if err == nil || !strings.Contains(err.Error(), "escapes workflow file") {
+		t.Fatalf("want escaping first_message_file error, got %v", err)
+	}
+}
+
 func TestValidate_Structural(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {

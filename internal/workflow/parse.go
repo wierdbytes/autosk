@@ -349,8 +349,18 @@ func allowedParamKeysList() string {
 // have a non-empty FirstMessageFile.
 //
 // Errors out for absolute paths and paths that escape baseDir, mirror
-// of pkgregistry.resolveInsidePkg.
+// of pkgregistry.resolveInsidePkg. The containment check is both lexical
+// (`..`) and symlink-aware so packaged workflows cannot inline host files
+// outside the workflow JSON directory.
 func resolveAgentParamFiles(def *Definition, baseDir string) error {
+	root, err := filepath.Abs(baseDir)
+	if err != nil {
+		return err
+	}
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve workflow directory %q: %w", root, err)
+	}
 	for stepName, sd := range def.Steps {
 		if sd.AgentParams == nil || sd.AgentParams.FirstMessageFile == "" {
 			continue
@@ -362,7 +372,10 @@ func resolveAgentParamFiles(def *Definition, baseDir string) error {
 		if filepath.IsAbs(path) {
 			return fmt.Errorf("step %q: agent.params.first_message_file must be a relative path inside the workflow file's directory, got %q", stepName, path)
 		}
-		abs := filepath.Join(baseDir, path)
+		abs, err := resolveInsideWorkflowDir(root, rootReal, path)
+		if err != nil {
+			return fmt.Errorf("step %q: agent.params.first_message_file %q: %w", stepName, path, err)
+		}
 		body, err := os.ReadFile(abs)
 		if err != nil {
 			return fmt.Errorf("step %q: read first_message_file %q: %w", stepName, abs, err)
@@ -373,6 +386,40 @@ func resolveAgentParamFiles(def *Definition, baseDir string) error {
 		def.Steps[stepName] = sd
 	}
 	return nil
+}
+
+func resolveInsideWorkflowDir(root, rootReal, rel string) (string, error) {
+	clean, err := filepath.Abs(filepath.Join(root, rel))
+	if err != nil {
+		return "", err
+	}
+	if !pathInside(root, clean) {
+		return "", fmt.Errorf("path escapes workflow file's directory")
+	}
+	real, err := filepath.EvalSymlinks(clean)
+	if err == nil {
+		if !pathInside(rootReal, real) {
+			return "", fmt.Errorf("path escapes workflow file's directory through symlink")
+		}
+		return clean, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("resolve first_message_file symlinks: %w", err)
+	}
+	// Let os.ReadFile below report the concrete missing-file error.
+	return clean, nil
+}
+
+func pathInside(root, candidate string) bool {
+	rel, err := filepath.Rel(root, candidate)
+	return err == nil && rel != ".." && !hasParentPathPrefix(rel)
+}
+
+func hasParentPathPrefix(p string) bool {
+	if len(p) < 2 {
+		return false
+	}
+	return p[0] == '.' && p[1] == '.' && (len(p) == 2 || p[2] == filepath.Separator || p[2] == '/')
 }
 
 func firstRune(s string) string {

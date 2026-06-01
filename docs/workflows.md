@@ -127,10 +127,11 @@ Plan: [`docs/plans/20260518-Agent-Packages.md`](plans/20260518-Agent-Packages.md
 ### Workflow
 
 A workflow is a small directed graph of steps. Define it as a JSON file
-and import:
+and import it, or install a packaged workflow bundle:
 
 ```bash
 autosk workflow create --file docs/examples/workflows/workflow-example.json
+autosk workflow install @your-org/workflows --workflow feature-dev
 ```
 
 #### Shipped default: `feature-dev-generic`
@@ -843,6 +844,45 @@ A worked example lives at
 [`docs/examples/workflows/workflow-example.json`](examples/workflows/workflow-example.json);
 the isolated variant is
 [`docs/examples/workflows/workflow-isolated-example.json`](examples/workflows/workflow-isolated-example.json).
+
+### Install from a workflow package
+
+Packages can ship one or more workflow JSON files and declare them in
+`package.json` under `autosk.workflows`:
+
+```jsonc
+{
+  "name": "@your-org/workflows",
+  "version": "0.1.0",
+  "autosk": {
+    "agent": { "runner": "./src/agent.ts" }, // optional
+    "workflows": [
+      { "name": "feature-dev", "file": "./workflows/feature-dev.json" }
+    ]
+  }
+}
+```
+
+Install one into the current project's `.autosk/db`:
+
+```bash
+autosk workflow install @your-org/workflows
+autosk workflow install ../local-workflows --workflow feature-dev
+autosk workflow install @your-org/workflows --version '^0.2.0' --json
+```
+
+If the package declares multiple workflows, pass `--workflow <name>`.
+`--no-install` uses an already-installed package only and does not run
+npm; any referenced agent packages must already be installed. If the
+workflow package also declares `autosk.agent`, that agent is registered
+in the current project. Scoped agents referenced by the workflow are
+auto-installed unless `--no-install` is set. Custom-runner agents require
+`@autosk/agent-runtime`; autosk installs it as needed unless `--no-install`
+is set, in which case preinstall it with `autosk agent runtime install`.
+
+`first_message_file` values inside packaged workflow JSON are resolved
+relative to that workflow file and must stay inside the workflow file's
+directory.
 
 ### What you can do in a workflow
 

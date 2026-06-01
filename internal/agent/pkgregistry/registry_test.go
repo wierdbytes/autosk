@@ -304,6 +304,76 @@ func TestResolve_RunnerEscapeRejected(t *testing.T) {
 	}
 }
 
+func TestInstallWorkflowSpec_WorkflowOnlyPackage(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "packages")
+	npm := &fakeNpm{}
+	npm.installFn = func(prefix, spec string) error {
+		dir := filepath.Join(prefix, "node_modules", "@autosk", "workflow-only")
+		if err := os.MkdirAll(filepath.Join(dir, "workflows"), 0o750); err != nil {
+			return err
+		}
+		pkg := map[string]any{
+			"name":    "@autosk/workflow-only",
+			"version": "0.4.0",
+			"autosk": map[string]any{"workflows": []any{map[string]any{
+				"name": "feature-dev-extra",
+				"file": "./workflows/feature-dev-extra.json",
+			}}},
+		}
+		body, _ := json.MarshalIndent(pkg, "", "  ")
+		if err := os.WriteFile(filepath.Join(dir, "package.json"), body, 0o600); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dir, "workflows", "feature-dev-extra.json"), []byte(`{"name":"feature-dev-extra"}`), 0o600)
+	}
+	r, _ := pkgregistry.Open(prefix, pkgregistry.WithNpm(npm))
+	entry, err := r.InstallWorkflowSpec(context.Background(), "@autosk/workflow-only", "")
+	if err != nil {
+		t.Fatalf("InstallWorkflowSpec: %v", err)
+	}
+	if entry.Version != "0.4.0" {
+		t.Fatalf("entry.Version=%q", entry.Version)
+	}
+	if r.Has("@autosk/workflow-only") {
+		t.Fatal("workflow-only package must not satisfy agent resolver Has")
+	}
+	workflows, err := r.ResolveWorkflows("@autosk/workflow-only")
+	if err != nil {
+		t.Fatalf("ResolveWorkflows: %v", err)
+	}
+	if len(workflows) != 1 || workflows[0].Name != "feature-dev-extra" || !filepath.IsAbs(workflows[0].File) {
+		t.Fatalf("unexpected workflows: %+v", workflows)
+	}
+}
+
+func TestInstallWorkflowSpec_RejectsMissingWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "packages")
+	npm := &fakeNpm{}
+	npm.installFn = func(prefix, spec string) error {
+		dir := filepath.Join(prefix, "node_modules", "@autosk", "missing-workflow")
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return err
+		}
+		pkg := map[string]any{
+			"name":    "@autosk/missing-workflow",
+			"version": "0.1.0",
+			"autosk":  map[string]any{"workflows": []any{map[string]any{"name": "missing", "file": "./missing.json"}}},
+		}
+		body, _ := json.MarshalIndent(pkg, "", "  ")
+		return os.WriteFile(filepath.Join(dir, "package.json"), body, 0o600)
+	}
+	r, _ := pkgregistry.Open(prefix, pkgregistry.WithNpm(npm))
+	_, err := r.InstallWorkflowSpec(context.Background(), "@autosk/missing-workflow", "")
+	if err == nil || !errors.Is(err, pkgregistry.ErrPackageMalformed) {
+		t.Fatalf("want ErrPackageMalformed, got %v", err)
+	}
+	if _, gerr := r.Get("@autosk/missing-workflow"); !errors.Is(gerr, pkgregistry.ErrNotInstalled) {
+		t.Fatalf("registry entry should be rolled back, got %v", gerr)
+	}
+}
+
 func TestUninstall_RemovesRegistryEntry(t *testing.T) {
 	dir := t.TempDir()
 	prefix := filepath.Join(dir, "packages")

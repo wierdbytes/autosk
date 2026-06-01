@@ -23,6 +23,24 @@ func openPackagesRegistry() (*pkgregistry.Registry, error) {
 	return pkgregistry.Default(pkgregistry.WithNpm(pkgregistryNpmFactory()))
 }
 
+// withJSONStdoutSilenced discards stdout produced by npm installs while
+// a JSON command is assembling its result, so the final stdout stream is
+// one machine-readable JSON document. Stderr is left untouched.
+func withJSONStdoutSilenced(fn func() error) error {
+	if !flagJSON {
+		return fn()
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = devNull.Close() }()
+	orig := os.Stdout
+	os.Stdout = devNull
+	defer func() { os.Stdout = orig }()
+	return fn()
+}
+
 // resolveInstallSpec translates the first argument to `autosk agent
 // install` into a (name, npm-spec) pair.
 //

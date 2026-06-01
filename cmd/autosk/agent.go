@@ -279,7 +279,11 @@ func newAgentListCmd() *cobra.Command {
 			}
 			var entries []pkgregistry.Entry
 			if e, err := reg.List(); err == nil {
-				entries = e
+				for _, entry := range e {
+					if _, err := reg.Resolve(entry.Name); err == nil {
+						entries = append(entries, entry)
+					}
+				}
 			}
 			return emitAgentUnion(dbRows, entries)
 		},
@@ -308,10 +312,10 @@ func newAgentShowCmd() *cobra.Command {
 			)
 			if regErr == nil {
 				if e, err := reg.Get(name); err == nil {
-					entry = e
-					gotPkg = true
 					if c, err := reg.Resolve(name); err == nil {
+						entry = e
 						cfg = c
+						gotPkg = true
 					}
 				}
 			}

@@ -30,6 +30,11 @@ import (
 type fakeNpmInProcess struct{}
 
 func (fakeNpmInProcess) Install(_ context.Context, prefix, spec string) error {
+	if pkgName, ok := localPackageName(spec); ok {
+		dir := filepath.Join(prefix, "node_modules", filepath.FromSlash(pkgName))
+		_ = os.RemoveAll(dir)
+		return copyDir(spec, dir)
+	}
 	// Strip @version if present.
 	name := spec
 	if i := strings.LastIndex(spec, "@"); i > 0 {
@@ -80,6 +85,51 @@ func (fakeNpmInProcess) Install(_ context.Context, prefix, spec string) error {
 
 func (fakeNpmInProcess) Uninstall(_ context.Context, prefix, name string) error {
 	return os.RemoveAll(filepath.Join(prefix, "node_modules", filepath.FromSlash(name)))
+}
+
+func localPackageName(spec string) (string, bool) {
+	if spec == "" || !filepath.IsAbs(spec) {
+		return "", false
+	}
+	name, err := pkgregistry.ReadPackageNameFromPath(spec)
+	if err != nil {
+		return "", false
+	}
+	return name, true
+}
+
+func copyDir(src, dst string) error {
+	srcRoot, err := filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	return filepath.Walk(srcRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o750)
+		}
+		if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." {
+			return os.ErrPermission
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		body, err := os.ReadFile(filepath.Clean(path))
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return err
+		}
+		return os.WriteFile(target, body, info.Mode())
+	})
 }
 
 // withIsolatedPackagesPrefix creates a fresh prefix and points

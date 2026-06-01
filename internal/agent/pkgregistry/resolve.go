@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // PackageConfig is the resolved view of a single installed agent
@@ -41,6 +42,17 @@ type PackageConfig struct {
 	PiSkills     []string
 }
 
+// WorkflowConfig is one workflow bundle declared by an installed
+// package's autosk.workflows manifest block. File is absolute and has
+// already been checked to stay inside InstallDir.
+type WorkflowConfig struct {
+	PackageName    string
+	PackageVersion string
+	InstallDir     string
+	Name           string
+	File           string
+}
+
 // packageManifest mirrors the bits of package.json we read.
 type packageManifest struct {
 	Name    string          `json:"name"`
@@ -49,7 +61,13 @@ type packageManifest struct {
 }
 
 type autoskManifest struct {
-	Agent *agentManifest `json:"agent,omitempty"`
+	Agent     *agentManifest     `json:"agent,omitempty"`
+	Workflows []workflowManifest `json:"workflows,omitempty"`
+}
+
+type workflowManifest struct {
+	Name string `json:"name"`
+	File string `json:"file"`
 }
 
 type agentManifest struct {
@@ -89,9 +107,87 @@ func (r *Registry) Resolve(name string) (PackageConfig, error) {
 	if name == HumanAgentName {
 		return PackageConfig{}, fmt.Errorf("%w: %s (the human agent has no package config)", ErrNotInstalled, name)
 	}
-	entry, err := r.Get(name)
+	entry, installDir, m, err := r.loadManifest(name)
 	if err != nil {
 		return PackageConfig{}, err
+	}
+	if m.Autosk == nil || m.Autosk.Agent == nil {
+		return PackageConfig{}, fmt.Errorf("%w: %s missing \"autosk.agent\" block in package.json",
+			ErrPackageMalformed, name)
+	}
+	return resolveAgentConfig(name, entry.Version, installDir, m.Autosk.Agent)
+}
+
+// ResolveAgentIfPresent returns the package's autosk.agent config when
+// the manifest declares one. Packages that only ship workflows are not
+// malformed for this helper; they return ok=false and nil error.
+func (r *Registry) ResolveAgentIfPresent(name string) (cfg PackageConfig, ok bool, err error) {
+	entry, installDir, m, err := r.loadManifest(name)
+	if err != nil {
+		return PackageConfig{}, false, err
+	}
+	if m.Autosk == nil || m.Autosk.Agent == nil {
+		return PackageConfig{}, false, nil
+	}
+	cfg, err = resolveAgentConfig(name, entry.Version, installDir, m.Autosk.Agent)
+	if err != nil {
+		return PackageConfig{}, false, err
+	}
+	return cfg, true, nil
+}
+
+// ResolveWorkflows loads and validates the autosk.workflows entries for
+// an installed package. It checks that each workflow name is unique and
+// that every file path stays inside the package and exists on disk.
+func (r *Registry) ResolveWorkflows(name string) ([]WorkflowConfig, error) {
+	entry, installDir, m, err := r.loadManifest(name)
+	if err != nil {
+		return nil, err
+	}
+	if m.Autosk == nil || len(m.Autosk.Workflows) == 0 {
+		return nil, fmt.Errorf("%w: %s missing non-empty \"autosk.workflows\" array in package.json",
+			ErrPackageMalformed, name)
+	}
+	seen := make(map[string]struct{}, len(m.Autosk.Workflows))
+	out := make([]WorkflowConfig, 0, len(m.Autosk.Workflows))
+	for i, wf := range m.Autosk.Workflows {
+		wf.Name = strings.TrimSpace(wf.Name)
+		wf.File = strings.TrimSpace(wf.File)
+		if wf.Name == "" {
+			return nil, fmt.Errorf("%w: %s autosk.workflows[%d].name is required", ErrPackageMalformed, name, i)
+		}
+		if wf.File == "" {
+			return nil, fmt.Errorf("%w: %s autosk.workflows[%d].file is required", ErrPackageMalformed, name, i)
+		}
+		if _, ok := seen[wf.Name]; ok {
+			return nil, fmt.Errorf("%w: %s declares duplicate workflow %q", ErrPackageMalformed, name, wf.Name)
+		}
+		seen[wf.Name] = struct{}{}
+		abs, err := resolveInsidePkg(installDir, wf.File)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s workflow %q file %q: %w", ErrPackageMalformed, name, wf.Name, wf.File, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("%w: %s workflow %q file missing: %s", ErrPackageMalformed, name, wf.Name, abs)
+			}
+			return nil, fmt.Errorf("stat workflow file %s: %w", abs, err)
+		}
+		out = append(out, WorkflowConfig{
+			PackageName:    name,
+			PackageVersion: entry.Version,
+			InstallDir:     installDir,
+			Name:           wf.Name,
+			File:           abs,
+		})
+	}
+	return out, nil
+}
+
+func (r *Registry) loadManifest(name string) (Entry, string, packageManifest, error) {
+	entry, err := r.Get(name)
+	if err != nil {
+		return Entry{}, "", packageManifest{}, err
 	}
 	installDir := r.PackageInstallDir(name)
 	manifestPath := filepath.Join(installDir, "package.json")
@@ -99,24 +195,23 @@ func (r *Registry) Resolve(name string) (PackageConfig, error) {
 	b, err := os.ReadFile(manifestPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return PackageConfig{}, fmt.Errorf("%w: %s is registered but %s does not exist (try `autosk agent install %s` again)",
+			return Entry{}, "", packageManifest{}, fmt.Errorf("%w: %s is registered but %s does not exist (try installing %s again)",
 				ErrPackageMalformed, name, manifestPath, name)
 		}
-		return PackageConfig{}, fmt.Errorf("read %s: %w", manifestPath, err)
+		return Entry{}, "", packageManifest{}, fmt.Errorf("read %s: %w", manifestPath, err)
 	}
 	var m packageManifest
 	if err := json.Unmarshal(b, &m); err != nil {
-		return PackageConfig{}, fmt.Errorf("%w: parse %s: %v", ErrPackageMalformed, manifestPath, err)
+		return Entry{}, "", packageManifest{}, fmt.Errorf("%w: parse %s: %w", ErrPackageMalformed, manifestPath, err)
 	}
 	if m.Name != name {
-		return PackageConfig{}, fmt.Errorf("%w: registered name %q does not match package.json name %q",
+		return Entry{}, "", packageManifest{}, fmt.Errorf("%w: registered name %q does not match package.json name %q",
 			ErrPackageMalformed, name, m.Name)
 	}
-	if m.Autosk == nil || m.Autosk.Agent == nil {
-		return PackageConfig{}, fmt.Errorf("%w: %s missing \"autosk.agent\" block in package.json",
-			ErrPackageMalformed, name)
-	}
-	am := m.Autosk.Agent
+	return entry, installDir, m, nil
+}
+
+func resolveAgentConfig(name, version, installDir string, am *agentManifest) (PackageConfig, error) {
 	if _, ok := validThinking[am.Thinking]; !ok {
 		return PackageConfig{}, fmt.Errorf("%w: %s thinking=%q (want one of off|minimal|low|medium|high|xhigh)",
 			ErrPackageMalformed, name, am.Thinking)
@@ -128,7 +223,7 @@ func (r *Registry) Resolve(name string) (PackageConfig, error) {
 
 	cfg := PackageConfig{
 		Name:         name,
-		Version:      entry.Version,
+		Version:      version,
 		InstallDir:   installDir,
 		Model:        am.Model,
 		Thinking:     am.Thinking,

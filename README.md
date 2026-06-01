@@ -130,10 +130,11 @@ Each package decides which model to call, what initial prompt to use, and how to
 
 A **workflow** is a directed graph of **steps**, where each step has an agent and one or more outgoing transitions. Workflows can be as small as *one step, one agent*, or as branchy as *developer → reviewer → either back to developer or on to validator*.
 
-You define workflows in JSON and load them into the DB:
+You can define workflows in JSON and load them into the DB, or install a workflow bundle declared by an npm-style package:
 
 ```bash
 autosk workflow create --file my-flow.json
+autosk workflow install @your-org/workflows --workflow feature-dev
 autosk workflow list
 ```
 

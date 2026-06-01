@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -48,6 +49,7 @@ func newWorkflowCmd() *cobra.Command {
 	}
 	cmd.AddCommand(
 		newWorkflowCreateCmd(),
+		newWorkflowInstallCmd(),
 		newWorkflowListCmd(),
 		newWorkflowShowCmd(),
 		newWorkflowDeleteCmd(),
@@ -375,36 +377,13 @@ func newWorkflowCreateCmd() *cobra.Command {
 // The function is a no-op (returns nil) when every agent is either
 // `human` or already in the DB.
 func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store) ([]pkgregistry.Entry, error) {
-	// Collect unique referenced agent names.
-	seen := make(map[string]struct{}, len(def.Steps))
-	for _, s := range def.Steps {
-		if s.AgentName == "" {
-			continue
-		}
-		seen[s.AgentName] = struct{}{}
-	}
-	if len(seen) == 0 {
-		return nil, nil
-	}
-
-	// Determine which need install (not in DB, not 'human', scoped name).
-	var todo []string
-	for name := range seen {
-		if name == agent.HumanAgentName {
-			continue
-		}
-		if _, err := ag.GetByName(ctx, name); err == nil {
-			continue
-		}
-		if !looksLikeScopedNpmName(name) {
-			continue
-		}
-		todo = append(todo, name)
+	todo, err := missingScopedWorkflowAgents(ctx, def, ag)
+	if err != nil {
+		return nil, err
 	}
 	if len(todo) == 0 {
 		return nil, nil
 	}
-	sort.Strings(todo)
 
 	reg, err := openPackagesRegistry()
 	if err != nil {
@@ -418,14 +397,14 @@ func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *
 	// newly-installed names. Re-uses the same *sql.DB handle.
 	agWithResolver := agent.New(dl.DB()).WithResolver(reg)
 
-	if !flagQuiet {
+	if !flagQuiet && !flagJSON {
 		fmt.Fprintf(os.Stderr, "workflow references %d uninstalled agent(s); installing: %s\n",
 			len(todo), strings.Join(todo, ", "))
 	}
 
 	installed := make([]pkgregistry.Entry, 0, len(todo))
 	for _, name := range todo {
-		if !flagQuiet {
+		if !flagQuiet && !flagJSON {
 			fmt.Fprintf(os.Stderr, "\u2192 agent install %s\n", name)
 		}
 		entry, ierr := reg.Install(ctx, name, "")
@@ -437,15 +416,99 @@ func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *
 			return installed, fmt.Errorf("auto-install %s failed: %w (install manually with `autosk agent install %s`)",
 				name, ierr, name)
 		}
+		if cfg, rerr := reg.Resolve(entry.Name); rerr == nil && cfg.Runner != "" {
+			if err := reg.EnsureRuntime(ctx, ""); err != nil {
+				return installed, fmt.Errorf("install runtime for custom-runner agent %s: %w", entry.Name, err)
+			}
+		}
 		if _, eerr := agWithResolver.EnsureByName(ctx, entry.Name); eerr != nil {
 			return installed, fmt.Errorf("register %s in agents table: %w", entry.Name, eerr)
 		}
-		if !flagQuiet {
+		if !flagQuiet && !flagJSON {
 			fmt.Fprintf(os.Stderr, "  installed %s@%s\n", entry.Name, entry.Version)
 		}
 		installed = append(installed, entry)
 	}
 	return installed, nil
+}
+
+func missingScopedWorkflowAgents(ctx context.Context, def workflow.Definition, ag *agent.Store) ([]string, error) {
+	seen := make(map[string]struct{}, len(def.Steps))
+	for _, s := range def.Steps {
+		if s.AgentName == "" {
+			continue
+		}
+		seen[s.AgentName] = struct{}{}
+	}
+	var todo []string
+	for name := range seen {
+		if name == agent.HumanAgentName || !looksLikeScopedNpmName(name) {
+			continue
+		}
+		if _, err := ag.GetByName(ctx, name); err == nil {
+			continue
+		} else if !errors.Is(err, agent.ErrNotFound) {
+			return nil, fmt.Errorf("check agent %s: %w", name, err)
+		}
+		todo = append(todo, name)
+	}
+	sort.Strings(todo)
+	return todo, nil
+}
+
+func registerPreinstalledWorkflowAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, reg *pkgregistry.Registry) error {
+	missing, err := missingScopedWorkflowAgents(ctx, def, ag)
+	if err != nil {
+		return err
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	var absent []string
+	for _, name := range missing {
+		if cfg, err := reg.Resolve(name); err != nil {
+			if errors.Is(err, pkgregistry.ErrNotInstalled) {
+				absent = append(absent, name)
+				continue
+			}
+			return fmt.Errorf("resolve preinstalled agent %s: %w", name, err)
+		} else if cfg.Runner != "" {
+			if err := ensureRuntimePreinstalled(reg, name); err != nil {
+				return err
+			}
+		}
+	}
+	if len(absent) > 0 {
+		return fmt.Errorf("--no-install: missing agent package(s): %s (install them first or omit --no-install)", strings.Join(absent, ", "))
+	}
+
+	agWithResolver := agent.New(dl.DB()).WithResolver(reg)
+	for _, name := range missing {
+		if _, err := agWithResolver.EnsureByName(ctx, name); err != nil {
+			return fmt.Errorf("register preinstalled agent %s in agents table: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func withAutoInstallJSONSilenced(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store) ([]pkgregistry.Entry, error) {
+	var installed []pkgregistry.Entry
+	err := withJSONStdoutSilenced(func() error {
+		var err error
+		installed, err = autoInstallMissingAgents(ctx, def, ag, dl)
+		return err
+	})
+	return installed, err
+}
+
+func ensureRuntimePreinstalled(reg *pkgregistry.Registry, agentName string) error {
+	if _, err := os.Stat(filepath.Join(reg.PackageInstallDir(pkgregistry.RuntimePackageName), "package.json")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("--no-install: custom-runner agent %s requires preinstalled %s (run `autosk agent runtime install` or omit --no-install)", agentName, pkgregistry.RuntimePackageName)
+		}
+		return fmt.Errorf("stat %s runtime package: %w", pkgregistry.RuntimePackageName, err)
+	}
+	return nil
 }
 
 // looksLikeScopedNpmName reports whether s is an npm name with a
@@ -458,6 +521,203 @@ func looksLikeScopedNpmName(s string) bool {
 	}
 	slash := strings.IndexByte(s, '/')
 	return slash > 1 && slash < len(s)-1
+}
+
+func newWorkflowInstallCmd() *cobra.Command {
+	var (
+		version      string
+		workflowName string
+		noInstall    bool
+	)
+	cmd := &cobra.Command{
+		Use:   "install <npm-name-or-path>",
+		Short: "Install a workflow from an npm-style package",
+		Long: "Installs a package from the npm registry or a local package path,\n" +
+			"selects one workflow declared under package.json autosk.workflows,\n" +
+			"and creates it in the current project's workflow DB.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			arg := strings.TrimSpace(args[0])
+			reg, err := openPackagesRegistry()
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			if err := reg.EnsurePrefix(); err != nil {
+				return err
+			}
+
+			name, spec, err := resolveInstallSpec(arg, version)
+			if err != nil {
+				return err
+			}
+			var entry pkgregistry.Entry
+			if noInstall {
+				entry, err = reg.Get(name)
+				if err != nil {
+					if errors.Is(err, pkgregistry.ErrNotInstalled) {
+						return fmt.Errorf("package not installed: %s (remove --no-install to install it)", name)
+					}
+					return err
+				}
+			} else {
+				err = withJSONStdoutSilenced(func() error {
+					var ierr error
+					entry, ierr = reg.InstallWorkflowSpec(ctx, name, spec)
+					return ierr
+				})
+				if err != nil {
+					return err
+				}
+			}
+
+			workflowConfigs, err := reg.ResolveWorkflows(entry.Name)
+			if err != nil {
+				return err
+			}
+			selected, err := selectPackageWorkflow(workflowConfigs, workflowName)
+			if err != nil {
+				return err
+			}
+			if _, err := os.Stat(selected.File); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("workflow file missing: %s", selected.File)
+				}
+				return fmt.Errorf("stat workflow file %s: %w", selected.File, err)
+			}
+			def, err := workflow.ParseFile(selected.File)
+			if err != nil {
+				return err
+			}
+			if def.Name != selected.Name {
+				return fmt.Errorf("workflow manifest name %q does not match workflow file name %q", selected.Name, def.Name)
+			}
+
+			wf, dl, closeFn, err := workflowStoreFromCmd(ctx, true)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			var registeredAgent *agent.Agent
+			if cfg, ok, err := reg.ResolveAgentIfPresent(entry.Name); err != nil {
+				return err
+			} else if ok {
+				if cfg.Runner != "" {
+					if noInstall {
+						if err := ensureRuntimePreinstalled(reg, entry.Name); err != nil {
+							return err
+						}
+					} else {
+						if err := withJSONStdoutSilenced(func() error { return reg.EnsureRuntime(ctx, "") }); err != nil {
+							return fmt.Errorf("install runtime for custom-runner agent %s: %w", entry.Name, err)
+						}
+					}
+				}
+				agWithResolver := agent.New(dl.DB()).WithResolver(reg)
+				created, err := agWithResolver.EnsureByName(ctx, entry.Name)
+				if err != nil {
+					return fmt.Errorf("ensure DB row for %s: %w", entry.Name, err)
+				}
+				registeredAgent = &created
+			}
+
+			var installedAgents []pkgregistry.Entry
+			if noInstall {
+				if err := registerPreinstalledWorkflowAgents(ctx, def, wf.Agents(), dl, reg); err != nil {
+					return err
+				}
+			} else {
+				installedAgents, err = withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl)
+				if err != nil {
+					return err
+				}
+			}
+			w, err := wf.Create(ctx, def, false /*isSynthetic*/)
+			if err != nil {
+				if errors.Is(err, workflow.ErrAlreadyExist) {
+					return fmt.Errorf("workflow already exists: %s", def.Name)
+				}
+				return err
+			}
+			_ = dl.DoltCommit(ctx, "workflow install "+w.Name+" from "+entry.Name+"@"+entry.Version)
+			return emitWorkflowInstall(entry, selected, w, registeredAgent, installedAgents)
+		},
+	}
+	cmd.Flags().StringVar(&version, "version", "", "npm version spec (default: latest)")
+	cmd.Flags().StringVar(&workflowName, "workflow", "", "workflow name to install when the package declares multiple workflows")
+	cmd.Flags().BoolVar(&noInstall, "no-install", false, "use an already-installed package only; do not run npm install")
+	return cmd
+}
+
+func selectPackageWorkflow(workflows []pkgregistry.WorkflowConfig, name string) (pkgregistry.WorkflowConfig, error) {
+	if len(workflows) == 0 {
+		return pkgregistry.WorkflowConfig{}, errors.New("package declares no workflows")
+	}
+	if name == "" {
+		if len(workflows) == 1 {
+			return workflows[0], nil
+		}
+		names := make([]string, 0, len(workflows))
+		for _, wf := range workflows {
+			names = append(names, wf.Name)
+		}
+		sort.Strings(names)
+		return pkgregistry.WorkflowConfig{}, fmt.Errorf("package declares multiple workflows (%s); pass --workflow NAME", strings.Join(names, ", "))
+	}
+	for _, wf := range workflows {
+		if wf.Name == name {
+			return wf, nil
+		}
+	}
+	names := make([]string, 0, len(workflows))
+	for _, wf := range workflows {
+		names = append(names, wf.Name)
+	}
+	sort.Strings(names)
+	return pkgregistry.WorkflowConfig{}, fmt.Errorf("workflow %q not found in package (available: %s)", name, strings.Join(names, ", "))
+}
+
+type workflowInstallJSON struct {
+	Package             entryJSON    `json:"package"`
+	Workflow            workflowJSON `json:"workflow"`
+	WorkflowFile        string       `json:"workflow_file"`
+	RegisteredAgent     *agentJSON   `json:"registered_agent,omitempty"`
+	AutoInstalledAgents []entryJSON  `json:"auto_installed_agents,omitempty"`
+}
+
+func emitWorkflowInstall(entry pkgregistry.Entry, selected pkgregistry.WorkflowConfig, w workflow.Workflow, registeredAgent *agent.Agent, installedAgents []pkgregistry.Entry) error {
+	if flagQuiet {
+		return nil
+	}
+	if flagJSON {
+		out := workflowInstallJSON{
+			Package:      entryToJSON(entry),
+			Workflow:     toWorkflowJSON(w, false),
+			WorkflowFile: selected.File,
+		}
+		if registeredAgent != nil {
+			agentJSON := toJSON(*registeredAgent)
+			out.RegisteredAgent = &agentJSON
+		}
+		for _, installed := range installedAgents {
+			out.AutoInstalledAgents = append(out.AutoInstalledAgents, entryToJSON(installed))
+		}
+		return json.NewEncoder(os.Stdout).Encode(out)
+	}
+	fmt.Printf("installed workflow %s from %s@%s\n", w.Name, entry.Name, entry.Version)
+	fmt.Printf("workflow_file: %s\n", filepath.Clean(selected.File))
+	if registeredAgent != nil {
+		fmt.Printf("agent_id:      %s\n", registeredAgent.ID)
+	}
+	if len(installedAgents) > 0 {
+		names := make([]string, 0, len(installedAgents))
+		for _, installed := range installedAgents {
+			names = append(names, installed.Name+"@"+installed.Version)
+		}
+		fmt.Printf("auto_agents:   %s\n", strings.Join(names, ", "))
+	}
+	return nil
 }
 
 func newWorkflowListCmd() *cobra.Command {

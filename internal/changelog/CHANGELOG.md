@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **workflow:** `autosk workflow install <package>` installs workflow bundles declared in npm-style packages via `package.json` `autosk.workflows`, with `--workflow`, `--version`, `--no-install`, and `--json` support.
+
 ### Changed
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
 
