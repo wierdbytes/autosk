@@ -19,6 +19,11 @@ import (
 // this prefix are rejected at parse time.
 const SyntheticPrefix = "single:"
 
+// RevisionSuffixMarker is reserved for old workflow rows kept alive after a
+// managed workflow definition is superseded. User-authored workflow names may
+// not end in a suffix containing this marker.
+const RevisionSuffixMarker = "@rev-"
+
 // Definition is the in-memory shape of a workflow JSON file. Steps are a
 // map so callers can navigate by name; transition order within a step
 // matches the source file order.

@@ -947,14 +947,15 @@ func renderWorkflowSyncError(err error, rep globalworkflow.SyncReport) error {
 
 // workflowJSON is the JSON projection used by `workflow show/create --json`.
 type workflowJSON struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description,omitempty"`
-	FirstStepID string     `json:"first_step_id"`
-	IsSynthetic bool       `json:"is_synthetic"`
-	Isolation   string     `json:"isolation"`
-	CreatedAt   string     `json:"created_at"`
-	Steps       []stepJSON `json:"steps,omitempty"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Description    string     `json:"description,omitempty"`
+	FirstStepID    string     `json:"first_step_id"`
+	IsSynthetic    bool       `json:"is_synthetic"`
+	Isolation      string     `json:"isolation"`
+	SupersededByID string     `json:"superseded_by_id,omitempty"`
+	CreatedAt      string     `json:"created_at"`
+	Steps          []stepJSON `json:"steps,omitempty"`
 }
 
 type stepJSON struct {
@@ -980,13 +981,14 @@ func toWorkflowJSON(w workflow.Workflow, withSteps bool) workflowJSON {
 		iso = string(workflow.IsolationNone)
 	}
 	wj := workflowJSON{
-		ID:          w.ID,
-		Name:        w.Name,
-		Description: w.Description,
-		FirstStepID: w.FirstStepID,
-		IsSynthetic: w.IsSynthetic,
-		Isolation:   iso,
-		CreatedAt:   w.CreatedAt.Format("2006-01-02T15:04:05Z"),
+		ID:             w.ID,
+		Name:           w.Name,
+		Description:    w.Description,
+		FirstStepID:    w.FirstStepID,
+		IsSynthetic:    w.IsSynthetic,
+		Isolation:      iso,
+		SupersededByID: w.SupersededByID,
+		CreatedAt:      w.CreatedAt.Format("2006-01-02T15:04:05Z"),
 	}
 	if withSteps {
 		for _, st := range w.Steps {
@@ -1033,6 +1035,9 @@ func emitWorkflow(w workflow.Workflow, withSteps bool) error {
 	fmt.Printf("synthetic:    %t\n", w.IsSynthetic)
 	if w.Isolation != "" && w.Isolation != workflow.IsolationNone {
 		fmt.Printf("isolation:    %s\n", w.Isolation)
+	}
+	if w.SupersededByID != "" {
+		fmt.Printf("superseded_by:%s\n", w.SupersededByID)
 	}
 	// Text output uses the operator's local TZ; the JSON form
 	// (toWorkflowJSON above) keeps the RFC3339 UTC string.

@@ -250,6 +250,11 @@ func TestValidate_Structural(t *testing.T) {
 			wantErr: "reserved prefix",
 		},
 		{
+			name:    "reserved revision suffix",
+			body:    `{"name":"feature-dev@rev-old","first_step":"a","steps":{"a":{"agent":{"name":"dev"},"next_steps":[{"task_status":"done","prompt_rule":"."}]}}}`,
+			wantErr: "reserved revision suffix",
+		},
+		{
 			name:    "step with no transitions",
 			body:    `{"name":"x","first_step":"a","steps":{"a":{"agent":{"name":"dev"},"next_steps":[]}}}`,
 			wantErr: "at least one transition",

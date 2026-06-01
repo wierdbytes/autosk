@@ -55,6 +55,9 @@ func Validate(ctx context.Context, def Definition, ag *agent.Store, opts Validat
 	if !opts.AllowSyntheticName && strings.HasPrefix(def.Name, SyntheticPrefix) {
 		addf("`name` starts with reserved prefix %q (used for synthetic single-agent workflows)", SyntheticPrefix)
 	}
+	if HasReservedRevisionSuffix(def.Name) {
+		addf("`name` uses reserved revision suffix marker %q (used for superseded managed workflow revisions)", RevisionSuffixMarker)
+	}
 	iso := def.Isolation.Normalize()
 	if !iso.Valid() {
 		addf("`isolation` has unknown value %q (want none|worktree)", string(def.Isolation))

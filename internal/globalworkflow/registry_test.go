@@ -101,6 +101,19 @@ func TestRegistryStoreLoadEnableDisableRemove(t *testing.T) {
 	}
 }
 
+func TestRegistryStoreDefinitionRejectsReservedRevisionSuffix(t *testing.T) {
+	r, err := globalworkflow.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	def := testDefinition()
+	def.Name = "global-test" + workflow.RevisionSuffixMarker + "old"
+	_, err = r.StoreDefinition(def, globalworkflow.StoreOptions{})
+	if !errors.Is(err, globalworkflow.ErrInvalidName) {
+		t.Fatalf("StoreDefinition error=%v, want ErrInvalidName", err)
+	}
+}
+
 func TestRegistryLoadDefinitionRejectsTamperedHash(t *testing.T) {
 	r, err := globalworkflow.Open(t.TempDir())
 	if err != nil {

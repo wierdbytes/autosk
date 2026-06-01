@@ -55,6 +55,9 @@ type Workflow struct {
 	Description string
 	FirstStepID string
 	IsSynthetic bool
+	// SupersededByID points from an inactive managed revision to the active
+	// successor that replaced it. Empty means this row is not superseded.
+	SupersededByID string
 	// Isolation is the workflow-level execution-isolation mode. See
 	// docs/plans/20260521-Worktree-Isolation.md. Empty in the on-disk
 	// row collapses to IsolationNone on scan so callers can compare
@@ -177,7 +180,7 @@ func (s *Store) ReplaceWithOrigin(ctx context.Context, name string, def Definiti
 	defer func() { _ = tx.Rollback() }()
 
 	row := tx.QueryRowContext(ctx,
-		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at, superseded_by_id
 		   FROM workflows WHERE name = ?`, name)
 	old, err := scanWorkflowRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -221,7 +224,7 @@ type preparedWorkflowCreate struct {
 
 func (s *Store) getWorkflowRowByName(ctx context.Context, name string) (Workflow, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at, superseded_by_id
 		   FROM workflows WHERE name = ?`, name)
 	w, err := scanWorkflowRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -411,7 +414,7 @@ func (s *Store) List(ctx context.Context, includeSynthetic bool) ([]Workflow, er
 	if s.db == nil {
 		return nil, ErrNotOpen
 	}
-	q := `SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+	q := `SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at, superseded_by_id
 	        FROM workflows`
 	if !includeSynthetic {
 		q += ` WHERE is_synthetic = 0`
@@ -760,7 +763,7 @@ func (s *Store) GetByID(ctx context.Context, workflowID string) (Workflow, error
 		return Workflow{}, ErrNotOpen
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at, superseded_by_id
 		   FROM workflows WHERE id = ?`, workflowID)
 	w, err := scanWorkflowRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -922,12 +925,13 @@ func marshalAgentParams(p *AgentParams) (any, error) {
 
 func scanWorkflowRow(sc interface{ Scan(...any) error }) (Workflow, error) {
 	var (
-		w         Workflow
-		synth     int
-		isolation sql.NullString
-		created   int64
+		w            Workflow
+		synth        int
+		isolation    sql.NullString
+		created      int64
+		supersededBy sql.NullString
 	)
-	if err := sc.Scan(&w.ID, &w.Name, &w.Description, &w.FirstStepID, &synth, &isolation, &created); err != nil {
+	if err := sc.Scan(&w.ID, &w.Name, &w.Description, &w.FirstStepID, &synth, &isolation, &created, &supersededBy); err != nil {
 		return Workflow{}, err
 	}
 	w.IsSynthetic = synth != 0
@@ -937,6 +941,7 @@ func scanWorkflowRow(sc interface{ Scan(...any) error }) (Workflow, error) {
 		w.Isolation = IsolationNone
 	}
 	w.CreatedAt = time.Unix(created, 0).UTC()
+	w.SupersededByID = supersededBy.String
 	return w, nil
 }
 

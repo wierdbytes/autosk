@@ -355,6 +355,9 @@ func validateName(name string) error {
 	if strings.ContainsAny(name, "\x00") {
 		return fmt.Errorf("%w: contains NUL", ErrInvalidName)
 	}
+	if workflow.HasReservedRevisionSuffix(name) {
+		return fmt.Errorf("%w: uses reserved revision suffix marker %q", ErrInvalidName, workflow.RevisionSuffixMarker)
+	}
 	return nil
 }
 

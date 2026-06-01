@@ -200,6 +200,30 @@ agent rows were changed. `--force` only replaces workflows already
 managed by the matching active global origin; local same-name conflicts
 and workflows currently in use are reported instead of overwritten.
 
+#### Managed revisions
+
+Managed workflows are workflows with active provenance that autosk owns,
+such as the shipped bootstrap workflow and future global-registry
+syncs. Re-applying the same canonical definition hash is a no-op except
+for refreshing provenance metadata. When the managed definition hash
+changes, autosk keeps the canonical workflow name attached to the new
+active definition while protecting existing tasks and daemon runs:
+
+- If the old managed row is unreferenced, autosk deletes it and creates
+  a fresh active row with the canonical name.
+- If tasks, daemon runs, or older revision links still reference the old
+  row, autosk renames it to `<name>@rev-<workflow-id-suffix>`, marks its
+  `workflow_origins` row inactive, creates a new active row with the
+  canonical name, and links the old row to the new one via
+  `superseded_by_id`.
+
+Existing tasks and runs continue to point at the old row's steps; new
+enrollments that use the canonical name resolve to the new active row.
+The `@rev-` marker is reserved for these internal revision names, so
+user-authored workflow names and global-registry entries may not contain
+it. A same-name workflow with no provenance is treated as user-owned and
+is left untouched.
+
 #### Shipped default: `feature-dev-generic`
 
 `autosk init` seeds one workflow into every new project so users can
@@ -233,23 +257,24 @@ the project root to be a git repository: a non-git root surfaces
 `ErrNotGitRepo` from the worktree allocator. See
 [Worktree isolation](#worktree-isolation) for the full mechanics.
 
-Bootstrap is idempotent: re-running `autosk init` is a no-op once the
-workflow row exists, regardless of its content (the engine does not
-diff the embedded JSON against the row). **Existing projects are not
-auto-migrated to the new isolation default**: a project whose
-`feature-dev-generic` row was seeded before this change keeps its
-stored `isolation=none` until you opt in explicitly with
-[`autosk workflow update`](#updating-isolation):
+Bootstrap is idempotent for unmanaged rows and unchanged managed
+rows: re-running `autosk init` skips a same-name workflow with no
+provenance, and it skips a managed `feature-dev-generic` row whose
+canonical hash already matches the embedded definition. When the
+embedded definition hash changes, `autosk init` applies the
+[managed revision](#managed-revisions) rules above so existing tasks and
+runs keep their old steps while new enrollments use the current shipped
+workflow. Projects seeded before provenance support are treated as
+unmanaged and are not auto-migrated; opt into individual settings such
+as isolation explicitly with [`autosk workflow update`](#updating-isolation),
+or delete and re-run `autosk init` if you want the current shipped
+definition.
 
-```bash
-autosk workflow update feature-dev-generic --isolation worktree
-# add --force if the workflow has non-terminal tasks; see the safety
-# matrix in the "Updating isolation" subsection.
-```
-
-If you have edited the seeded workflow and want the default back,
-`autosk workflow delete feature-dev-generic` followed by `autosk init`
-re-creates it (with the current default, `isolation=worktree`).
+If you have forked the seeded workflow locally and want to avoid future
+managed revisions, keep the fork under a different workflow name. If you
+want the shipped default back, `autosk workflow delete
+feature-dev-generic` followed by `autosk init` re-creates it with the
+current embedded definition.
 
 If you want a truly empty database, pass `--skip-bootstrap`:
 
@@ -279,8 +304,9 @@ whether stdin/stderr are attached to a real terminal:
   Empty answer or `y`/`yes` accepts. `n`/`no` aborts the verb with an
   error pointing at `autosk init`, `--db`, and `AUTOSK_DB`. After an
   accepted prompt the bootstrap sequence is identical to
-  `autosk init`: migrations, packages-prefix touch, then seed the
-  `feature-dev-generic` workflow and install `@autogent/generic`.
+  `autosk init`: migrations, then the same managed bootstrap decision
+  for `feature-dev-generic` (including installing `@autogent/generic`
+  only when a create or revision sync is needed).
 
 - **Non-interactive (no TTY, piped stdin, `--json`, `--quiet`).** The
   prompt is skipped and the CLI behaves as if the user answered `y`.
@@ -820,7 +846,8 @@ Merge semantics:
 
 Validation enforces:
 
-- `name` is unique and does not start with the reserved prefix `single:`.
+- `name` is unique, does not start with the reserved prefix `single:`,
+  and does not contain the reserved managed-revision marker `@rev-`.
 - `first_step` exists in `steps`.
 - Every step has ≥1 transition.
 - Every referenced agent exists in the `agents` table.
@@ -882,7 +909,7 @@ autosk enroll ask-3f9b2c --workflow my-flow
 
 ```jsonc
 {
-  "name":        "my-flow",                     // unique, must not start with "single:"
+  "name":        "my-flow",                     // unique; no "single:" prefix or "@rev-" marker
   "description": "…",                           // optional, free text
   "first_step":  "dev",                         // entry step; must exist in `steps`
   "isolation":   "worktree",                    // "none" (default) or "worktree"

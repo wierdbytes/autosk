@@ -48,6 +48,13 @@ func TestApply_FreshDB_AppliesInitialMigration(t *testing.T) {
 
 	// Every release-schema table is present.
 	tables := scanTableSet(t, ctx, db)
+	cols := scanColumnSet(ctx, t, db, "workflows")
+	if !cols["superseded_by_id"] {
+		t.Errorf("workflows missing superseded_by_id column; have: %v", sortedKeys(cols))
+	}
+	if got := foreignKeyDeleteAction(ctx, t, db, "workflows", "superseded_by_id"); got != "SET NULL" {
+		t.Errorf("workflows.superseded_by_id ON DELETE = %q, want SET NULL", got)
+	}
 	for _, want := range []string{
 		"agents", "workflows", "steps", "step_transitions", "workflow_origins",
 		"tasks", "task_deps", "comments",
@@ -186,6 +193,54 @@ func scanTableSet(t *testing.T, ctx context.Context, db *sql.DB) map[string]bool
 		t.Fatalf("rows.Err: %v", err)
 	}
 	return out
+}
+
+func scanColumnSet(ctx context.Context, t *testing.T, db *sql.DB, table string) map[string]bool {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		t.Fatalf("list columns for %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan column: %v", err)
+		}
+		out[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	return out
+}
+
+func foreignKeyDeleteAction(ctx context.Context, t *testing.T, db *sql.DB, table, fromColumn string) string {
+	t.Helper()
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(`+table+`)`)
+	if err != nil {
+		t.Fatalf("list foreign keys for %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, seq int
+		var tableName, from, to, onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &tableName, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			t.Fatalf("scan foreign key: %v", err)
+		}
+		if from == fromColumn {
+			return onDelete
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	return ""
 }
 
 func sortedKeys(m map[string]bool) []string {

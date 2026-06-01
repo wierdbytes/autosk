@@ -254,6 +254,53 @@ func TestInit_Idempotent(t *testing.T) {
 // TestInit_SkipBootstrap covers AC6 + AC7: --skip-bootstrap on a clean
 // dir leaves the workflow list empty, and running --skip-bootstrap
 // after a previous bootstrap does not undo the seed.
+func TestInit_UnmanagedBootstrapNameSkipsBeforeAgentInstall(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	dir := t.TempDir()
+	if _, err := runRoot(t, dir, "init", "--skip-bootstrap"); err != nil {
+		t.Fatalf("init --skip-bootstrap: %v", err)
+	}
+
+	wf := map[string]any{
+		"name":       "feature-dev-generic",
+		"first_step": "hold",
+		"steps": map[string]any{
+			"hold": map[string]any{
+				"agent": map[string]any{"name": "human"},
+				"next_steps": []any{
+					map[string]any{"task_status": "human", "prompt_rule": "pause"},
+				},
+			},
+		},
+	}
+	body, _ := json.MarshalIndent(wf, "", "  ")
+	wfPath := filepath.Join(dir, "unmanaged-bootstrap-name.json")
+	if err := os.WriteFile(wfPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runRoot(t, dir, "workflow", "create", "--file", wfPath); err != nil {
+		t.Fatalf("workflow create unmanaged collision: %v\n%s", err, out)
+	}
+
+	out, err := runRoot(t, dir, "init")
+	if err != nil {
+		t.Fatalf("init over unmanaged bootstrap-name workflow: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "already present") {
+		t.Errorf("expected already-present skip line:\n%s", out)
+	}
+	if strings.Contains(out, "installing") || strings.Contains(out, "agent install @autogent/generic") {
+		t.Errorf("init should not auto-install before unmanaged no-op detection:\n%s", out)
+	}
+	agents, err := runRoot(t, dir, "agent", "list")
+	if err != nil {
+		t.Fatalf("agent list: %v\n%s", err, agents)
+	}
+	if strings.Contains(agents, "@autogent/generic") {
+		t.Errorf("init installed bootstrap agent despite unmanaged workflow collision:\n%s", agents)
+	}
+}
+
 func TestInit_SkipBootstrap(t *testing.T) {
 	withIsolatedPackagesPrefix(t)
 	dir := t.TempDir()

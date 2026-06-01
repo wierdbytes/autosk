@@ -113,13 +113,15 @@ CI and offline machines).`,
 // bootstrapDefaultWorkflow seeds the canonical `feature-dev-generic`
 // workflow (definition lives at internal/bootstrap/feature-dev-generic.json).
 //
-// Behaviour is intentionally idempotent: if a workflow with that name
-// already exists in the DB, the call is a silent no-op (one
-// informational line at non-quiet verbosity). Otherwise it:
+// Behaviour is intentionally idempotent for unmanaged same-name rows and
+// unchanged managed rows: those cases are silent no-ops (one informational
+// line at non-quiet verbosity). When the existing managed row has a different
+// canonical hash, SyncManagedDefinition installs a safe new revision while
+// preserving referenced old rows. Otherwise this function:
 //
 //  1. Auto-installs @autogent/generic via the same path used by
-//     `autosk workflow create --file`.
-//  2. Creates the workflow row + its steps + transitions.
+//     `autosk workflow create --file` (only when create/sync is needed).
+//  2. Creates or revises the workflow row + its steps + transitions.
 //  3. Commits the change to doltlite with a dedicated message.
 //
 // Callers wrap the error in a warning; this function does not print on
@@ -130,46 +132,69 @@ func bootstrapDefaultWorkflow(ctx context.Context, s *doltlite.Store) error {
 		return fmt.Errorf("load embedded definition: %w", err)
 	}
 	wf := workflow.New(s.DB(), agent.New(s.DB()))
-
-	// Idempotency check by name. A user who explicitly deleted the
-	// workflow gets it re-created on the next init — that's the
-	// documented escape hatch.
-	_, gerr := wf.GetByName(ctx, def.Name)
-	if gerr == nil {
-		if !flagQuiet {
-			fmt.Printf("bootstrap: workflow %q already present, skipping\n", def.Name)
-		}
-		return nil
+	origin := workflow.Origin{
+		SourceType:     "bootstrap",
+		Source:         "internal/bootstrap/feature-dev-generic.json",
+		SourceMetadata: map[string]any{"workflow": def.Name},
+		Revision:       "embedded",
 	}
-	if !errors.Is(gerr, workflow.ErrNotFound) {
-		return fmt.Errorf("check workflow %q: %w", def.Name, gerr)
+
+	existing, err := wf.GetByName(ctx, def.Name)
+	if err == nil {
+		existingOrigin, oerr := wf.GetOrigin(ctx, existing.ID)
+		if errors.Is(oerr, workflow.ErrNotFound) {
+			if !flagQuiet {
+				fmt.Printf("bootstrap: workflow %q already present, skipping\n", def.Name)
+			}
+			return nil
+		}
+		if oerr != nil {
+			return fmt.Errorf("read workflow origin: %w", oerr)
+		}
+		hash, herr := workflow.HashDefinition(def)
+		if herr != nil {
+			return fmt.Errorf("hash embedded definition: %w", herr)
+		}
+		if existingOrigin.DefinitionHash == hash {
+			if !flagQuiet {
+				fmt.Printf("bootstrap: workflow %q already present, skipping\n", def.Name)
+			}
+			return nil
+		}
+	} else if !errors.Is(err, workflow.ErrNotFound) {
+		return err
 	}
 
 	// Auto-install any scoped npm agents the bootstrap references. The
 	// helper short-circuits cleanly when the agent is already in the
 	// DB (re-runs of init after the user manually installed the agent
-	// then deleted the workflow row).
+	// then deleted the workflow row). Existing unmanaged/name-only and
+	// managed no-op rows return above so init does not touch the package
+	// registry just to discover SyncManagedDefinition will skip.
 	installed, err := autoInstallMissingAgents(ctx, def, wf.Agents(), s)
 	if err != nil {
 		return err
 	}
 
-	w, err := wf.Create(ctx, def, false /*isSynthetic*/)
+	rep, err := wf.SyncManagedDefinition(ctx, def, origin)
 	if err != nil {
-		// Belt-and-suspenders against a TOCTOU race with a parallel
-		// writer (two `autosk init` processes on a fresh DB, the
-		// daemon racing a manual init, etc.): doltlite is
-		// single-writer at the connection level, so the loser only
-		// learns about the conflict at Create-time. Treat it as the
-		// same idempotent no-op as the GetByName-found branch above
-		// instead of a confusing warning.
+		// Belt-and-suspenders against a TOCTOU race with a parallel writer
+		// (two `autosk init` processes on a fresh DB, the daemon racing a
+		// manual init, etc.).
 		if errors.Is(err, workflow.ErrAlreadyExist) {
 			if !flagQuiet {
 				fmt.Printf("bootstrap: workflow %q already present, skipping\n", def.Name)
 			}
 			return nil
 		}
-		return fmt.Errorf("create workflow: %w", err)
+		return fmt.Errorf("sync workflow: %w", err)
+	}
+	w := rep.Workflow
+	if rep.Noop {
+		if !flagQuiet {
+			fmt.Printf("bootstrap: workflow %q already present, skipping\n", def.Name)
+		}
+		return nil
 	}
 	_ = s.DoltCommit(ctx, "init: bootstrap "+w.Name+" workflow")
 

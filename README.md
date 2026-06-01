@@ -149,9 +149,12 @@ overwriting local same-name workflows.
 every step owned by `@autogent/generic`, `isolation: worktree`). The
 canonical JSON lives at
 [`internal/bootstrap/feature-dev-generic.json`](internal/bootstrap/feature-dev-generic.json)
-and is embedded into the binary; copy that file and pass it to
-`autosk workflow create --file ...` under a different name if you want
-to fork it.
+and is embedded into the binary. Managed copies are reconciled by
+canonical hash on `autosk init`; old referenced revisions are kept under
+reserved `@rev-` names so existing tasks/runs remain valid. See
+[managed revisions](docs/workflows.md#managed-revisions). Copy the
+embedded file and pass it to `autosk workflow create --file ...` under a
+different name if you want to fork it.
 
 For one-off uses, skip the workflow file and pass `--agent <pkg>` to `enroll` — autosk creates a synthetic single-step workflow for you on the fly.
 
