@@ -15,6 +15,7 @@ import (
 
 	"autosk/internal/agent"
 	"autosk/internal/agent/pkgregistry"
+	"autosk/internal/globalworkflow"
 	"autosk/internal/render"
 	"autosk/internal/store/doltlite"
 	"autosk/internal/timeformat"
@@ -54,6 +55,7 @@ func newWorkflowCmd() *cobra.Command {
 		newWorkflowShowCmd(),
 		newWorkflowDeleteCmd(),
 		newWorkflowUpdateCmd(),
+		newWorkflowSyncCmd(),
 	)
 	return cmd
 }
@@ -720,6 +722,54 @@ func emitWorkflowInstall(entry pkgregistry.Entry, selected pkgregistry.WorkflowC
 	return nil
 }
 
+func newWorkflowSyncCmd() *cobra.Command {
+	var (
+		force  bool
+		dryRun bool
+	)
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Materialize enabled global workflows into this project",
+		Long: "Materialize enabled workflows from the global workflow registry into the current project.\n\n" +
+			"Local workflows with the same name but no matching global origin are reported as conflicts\n" +
+			"and are never overwritten. Changed global-managed workflows are skipped unless --force\n" +
+			"is passed. Use --dry-run to preview changes without installing agents or writing the DB.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := globalworkflow.Default()
+			if err != nil {
+				return err
+			}
+			wf, dl, closeFn, err := workflowStoreFromCmd(cmd.Context(), !dryRun)
+			if err != nil {
+				return err
+			}
+			defer closeFn()
+
+			report, err := globalworkflow.SyncGlobalWorkflows(cmd.Context(), reg, wf, globalworkflow.SyncOptions{
+				DryRun: dryRun,
+				Force:  force,
+				InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+					return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl)
+				},
+			})
+			if !dryRun && report.Mutated() {
+				_ = dl.DoltCommit(cmd.Context(), "workflow sync global")
+			}
+			if emitErr := emitWorkflowSyncReport(report); emitErr != nil {
+				return emitErr
+			}
+			if err != nil {
+				return renderWorkflowSyncError(err, report)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "replace changed global-managed workflows when safe")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "preview sync without installing agents or writing the project DB")
+	return cmd
+}
+
 func newWorkflowListCmd() *cobra.Command {
 	var all bool
 	cmd := &cobra.Command{
@@ -792,6 +842,105 @@ func newWorkflowDeleteCmd() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+type workflowSyncJSON struct {
+	Prefix    string                     `json:"prefix"`
+	DryRun    bool                       `json:"dry_run"`
+	Force     bool                       `json:"force"`
+	Workflows []workflowSyncWorkflowJSON `json:"workflows"`
+}
+
+type workflowSyncWorkflowJSON struct {
+	Name                string      `json:"name"`
+	Status              string      `json:"status"`
+	WorkflowID          string      `json:"workflow_id,omitempty"`
+	DefinitionHash      string      `json:"definition_hash,omitempty"`
+	PreviousHash        string      `json:"previous_hash,omitempty"`
+	Revision            string      `json:"revision,omitempty"`
+	Reason              string      `json:"reason,omitempty"`
+	Error               string      `json:"error,omitempty"`
+	AutoInstalledAgents []entryJSON `json:"auto_installed_agents,omitempty"`
+}
+
+func toWorkflowSyncJSON(rep globalworkflow.SyncReport) workflowSyncJSON {
+	out := workflowSyncJSON{Prefix: rep.Prefix, DryRun: rep.DryRun, Force: rep.Force}
+	for _, item := range rep.Workflows {
+		wj := workflowSyncWorkflowJSON{
+			Name:           item.Name,
+			Status:         string(item.Status),
+			WorkflowID:     item.WorkflowID,
+			DefinitionHash: item.DefinitionHash,
+			PreviousHash:   item.PreviousHash,
+			Revision:       item.Revision,
+			Reason:         item.Reason,
+			Error:          item.Error,
+		}
+		for _, installed := range item.AutoInstalledAgents {
+			wj.AutoInstalledAgents = append(wj.AutoInstalledAgents, entryToJSON(installed))
+		}
+		out.Workflows = append(out.Workflows, wj)
+	}
+	return out
+}
+
+func emitWorkflowSyncReport(rep globalworkflow.SyncReport) error {
+	if flagQuiet {
+		return nil
+	}
+	if flagJSON {
+		return json.NewEncoder(os.Stdout).Encode(toWorkflowSyncJSON(rep))
+	}
+	prefix := ""
+	if rep.DryRun {
+		prefix = "dry-run: "
+	}
+	if len(rep.Workflows) == 0 {
+		fmt.Printf("%sworkflow sync: no enabled global workflows\n", prefix)
+		return nil
+	}
+	for _, item := range rep.Workflows {
+		fmt.Printf("%sworkflow %s: %s", prefix, item.Name, item.Status)
+		if item.Reason != "" {
+			fmt.Printf(" (%s)", item.Reason)
+		}
+		if item.Error != "" {
+			fmt.Printf(": %s", item.Error)
+		}
+		fmt.Println()
+		if len(item.AutoInstalledAgents) > 0 {
+			names := make([]string, 0, len(item.AutoInstalledAgents))
+			for _, installed := range item.AutoInstalledAgents {
+				names = append(names, installed.Name+"@"+installed.Version)
+			}
+			fmt.Printf("  auto_agents: %s\n", strings.Join(names, ", "))
+		}
+	}
+	return nil
+}
+
+func renderWorkflowSyncError(err error, rep globalworkflow.SyncReport) error {
+	if !errors.Is(err, globalworkflow.ErrSyncFailed) {
+		return err
+	}
+	var parts []string
+	for _, item := range rep.Workflows {
+		switch item.Status {
+		case globalworkflow.SyncConflict, globalworkflow.SyncError:
+			msg := item.Name + ": " + string(item.Status)
+			if item.Reason != "" {
+				msg += " (" + item.Reason + ")"
+			}
+			if item.Error != "" {
+				msg += ": " + item.Error
+			}
+			parts = append(parts, msg)
+		}
+	}
+	if len(parts) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, strings.Join(parts, "; "))
 }
 
 // ---- render --------------------------------------------------------------

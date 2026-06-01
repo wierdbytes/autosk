@@ -106,6 +106,79 @@ func TestCreate_AgentMissingFailsValidate(t *testing.T) {
 	}
 }
 
+func mustParseWorkflow(t *testing.T, body string) workflow.Definition {
+	t.Helper()
+	def, err := workflow.ParseReader(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return def
+}
+
+func TestCreateWithOrigin_OriginFailureRollsBackWorkflow(t *testing.T) {
+	wf, _, _, done := newWFFixture(t)
+	defer done()
+	ctx := context.Background()
+	def := mustParseWorkflow(t, `{
+		"name": "origin-create-fails", "first_step": "dev",
+		"steps": {"dev": {"agent": {"name": "developer"}, "next_steps": [{"task_status":"done","prompt_rule":"."}]}}
+	}`)
+
+	_, err := wf.CreateWithOrigin(ctx, def, false, workflow.Origin{
+		SourceType:     "global",
+		Source:         def.Name,
+		SourceMetadata: map[string]any{"bad": func() {}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "marshal workflow origin metadata") {
+		t.Fatalf("want origin marshal error, got %v", err)
+	}
+	if _, err := wf.GetByName(ctx, def.Name); !errors.Is(err, workflow.ErrNotFound) {
+		t.Fatalf("workflow left behind after origin failure: %v", err)
+	}
+}
+
+func TestReplaceWithOrigin_OriginFailureKeepsOldWorkflow(t *testing.T) {
+	wf, _, _, done := newWFFixture(t)
+	defer done()
+	ctx := context.Background()
+	v1 := mustParseWorkflow(t, `{
+		"name": "origin-replace-fails", "description": "v1", "first_step": "dev",
+		"steps": {"dev": {"agent": {"name": "developer"}, "next_steps": [{"task_status":"done","prompt_rule":"."}]}}
+	}`)
+	created, err := wf.CreateWithOrigin(ctx, v1, false, workflow.Origin{SourceType: "global", Source: v1.Name, DefinitionHash: "h1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := mustParseWorkflow(t, `{
+		"name": "origin-replace-fails", "description": "v2", "first_step": "dev",
+		"steps": {"dev": {"agent": {"name": "developer"}, "next_steps": [{"task_status":"done","prompt_rule":"."}]}}
+	}`)
+
+	_, err = wf.ReplaceWithOrigin(ctx, v1.Name, v2, workflow.Origin{
+		SourceType:     "global",
+		Source:         v1.Name,
+		DefinitionHash: "h2",
+		SourceMetadata: map[string]any{"bad": func() {}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "marshal workflow origin metadata") {
+		t.Fatalf("want origin marshal error, got %v", err)
+	}
+	got, err := wf.GetByName(ctx, v1.Name)
+	if err != nil {
+		t.Fatalf("old workflow missing after failed replace: %v", err)
+	}
+	if got.ID != created.ID || got.Description != "v1" {
+		t.Fatalf("old workflow not preserved: got=%+v created=%+v", got, created)
+	}
+	origin, err := wf.GetOrigin(ctx, got.ID)
+	if err != nil {
+		t.Fatalf("old origin missing after failed replace: %v", err)
+	}
+	if origin.DefinitionHash != "h1" {
+		t.Fatalf("old origin not preserved: %+v", origin)
+	}
+}
+
 // TestCreate_RoundTripsAgentParams verifies that per-step agent.params
 // blocks are persisted through the steps table and read back as a
 // non-nil AgentParams.

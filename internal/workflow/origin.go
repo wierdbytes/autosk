@@ -36,28 +36,38 @@ func (s *Store) UpsertOrigin(ctx context.Context, o Origin) (Origin, error) {
 	if s.db == nil {
 		return Origin{}, ErrNotOpen
 	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Origin{}, fmt.Errorf("begin workflow origin upsert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.upsertOriginTx(ctx, tx, o); err != nil {
+		return Origin{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Origin{}, fmt.Errorf("commit workflow origin upsert: %w", err)
+	}
+	return s.GetOrigin(ctx, strings.TrimSpace(o.WorkflowID))
+}
+
+func (s *Store) upsertOriginTx(ctx context.Context, tx *sql.Tx, o Origin) error {
 	o.WorkflowID = strings.TrimSpace(o.WorkflowID)
 	o.SourceType = strings.TrimSpace(o.SourceType)
 	o.Source = strings.TrimSpace(o.Source)
 	o.DefinitionHash = strings.TrimSpace(o.DefinitionHash)
 	o.Revision = strings.TrimSpace(o.Revision)
 	if o.WorkflowID == "" {
-		return Origin{}, errors.New("workflow origin: workflow_id is required")
+		return errors.New("workflow origin: workflow_id is required")
 	}
 	if o.SourceType == "" {
-		return Origin{}, errors.New("workflow origin: source_type is required")
+		return errors.New("workflow origin: source_type is required")
 	}
 	metadata, err := marshalOriginMetadata(o.SourceMetadata)
 	if err != nil {
-		return Origin{}, err
+		return err
 	}
 	now := time.Now().Unix()
 	active, setActive := originActiveOverride(o)
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Origin{}, fmt.Errorf("begin workflow origin upsert: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 	var res sql.Result
 	if setActive {
 		res, err = tx.ExecContext(ctx, `
@@ -75,7 +85,7 @@ func (s *Store) UpsertOrigin(ctx context.Context, o Origin) (Origin, error) {
 			o.SourceType, o.Source, metadata, o.DefinitionHash, o.Revision, now, o.WorkflowID)
 	}
 	if err != nil {
-		return Origin{}, fmt.Errorf("update workflow origin: %w", err)
+		return fmt.Errorf("update workflow origin: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		if setActive {
@@ -94,13 +104,10 @@ func (s *Store) UpsertOrigin(ctx context.Context, o Origin) (Origin, error) {
 				o.WorkflowID, o.SourceType, o.Source, metadata, o.DefinitionHash, o.Revision, now, now)
 		}
 		if err != nil {
-			return Origin{}, fmt.Errorf("insert workflow origin: %w", err)
+			return fmt.Errorf("insert workflow origin: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return Origin{}, fmt.Errorf("commit workflow origin upsert: %w", err)
-	}
-	return s.GetOrigin(ctx, o.WorkflowID)
+	return nil
 }
 
 // GetOrigin returns provenance for workflowID, or ErrNotFound.

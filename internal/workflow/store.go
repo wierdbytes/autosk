@@ -97,6 +97,10 @@ type Store struct {
 	agent *agent.Store // resolves agent names → ids during Create
 }
 
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 // New constructs a Store. agent_store must be non-nil (we need it for
 // agent name → id resolution).
 func New(db *sql.DB, ag *agent.Store) *Store {
@@ -113,18 +117,171 @@ func (s *Store) Agents() *agent.Store { return s.agent }
 //
 // On UNIQUE(name) collision returns ErrAlreadyExist.
 func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (Workflow, error) {
+	created, err := s.create(ctx, def, isSynthetic, nil)
+	if err != nil {
+		return Workflow{}, err
+	}
+	return s.GetByName(ctx, created.workflowName)
+}
+
+// CreateWithOrigin persists a parsed Definition and its provenance in one
+// database transaction. If writing either the workflow graph or the origin row
+// fails, neither is left behind.
+func (s *Store) CreateWithOrigin(ctx context.Context, def Definition, isSynthetic bool, origin Origin) (Workflow, error) {
+	created, err := s.create(ctx, def, isSynthetic, &origin)
+	if err != nil {
+		return Workflow{}, err
+	}
+	return s.GetByName(ctx, created.workflowName)
+}
+
+// CheckReplaceAllowed verifies that replacing name with def would not violate
+// non-mutating store preconditions such as name matching and in-use protection.
+// It intentionally does not validate agent availability or write anything.
+func (s *Store) CheckReplaceAllowed(ctx context.Context, name string, def Definition) error {
 	if s.db == nil {
-		return Workflow{}, ErrNotOpen
+		return ErrNotOpen
+	}
+	if def.Name != name {
+		return fmt.Errorf("replacement workflow name %q does not match existing workflow %q", def.Name, name)
+	}
+	old, err := s.getWorkflowRowByName(ctx, name)
+	if err != nil {
+		return err
+	}
+	refs, err := s.countTaskRefs(ctx, old.ID)
+	if err != nil {
+		return err
+	}
+	if refs > 0 {
+		return fmt.Errorf("%w: %d task(s) reference %q", ErrInUse, refs, name)
+	}
+	return nil
+}
+
+// ReplaceWithOrigin atomically replaces an existing workflow with def and a
+// matching origin row. Validation and agent resolution happen before the old
+// workflow is deleted; any later failure rolls back the delete+insert together.
+func (s *Store) ReplaceWithOrigin(ctx context.Context, name string, def Definition, origin Origin) (Workflow, error) {
+	if def.Name != name {
+		return Workflow{}, fmt.Errorf("replacement workflow name %q does not match existing workflow %q", def.Name, name)
+	}
+	prep, err := s.prepareCreate(ctx, def, false)
+	if err != nil {
+		return Workflow{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Workflow{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	row := tx.QueryRowContext(ctx,
+		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+		   FROM workflows WHERE name = ?`, name)
+	old, err := scanWorkflowRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Workflow{}, ErrNotFound
+	}
+	if err != nil {
+		return Workflow{}, err
+	}
+	refs, err := countTaskRefs(ctx, tx, old.ID)
+	if err != nil {
+		return Workflow{}, err
+	}
+	if refs > 0 {
+		return Workflow{}, fmt.Errorf("%w: %d task(s) reference %q", ErrInUse, refs, name)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM workflows WHERE id = ?`, old.ID); err != nil {
+		return Workflow{}, fmt.Errorf("delete workflow: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `REINDEX workflows`); err != nil {
+		return Workflow{}, fmt.Errorf("reindex workflows after delete: %w", err)
+	}
+	if err := s.insertDefinitionTx(ctx, tx, def, false, prep); err != nil {
+		return Workflow{}, err
+	}
+	origin.WorkflowID = prep.workflowID
+	if err := s.upsertOriginTx(ctx, tx, origin); err != nil {
+		return Workflow{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Workflow{}, fmt.Errorf("commit: %w", err)
+	}
+	return s.GetByName(ctx, def.Name)
+}
+
+type preparedWorkflowCreate struct {
+	workflowID   string
+	workflowName string
+	stepIDs      map[string]string
+	stepAgents   map[string]string
+}
+
+func (s *Store) getWorkflowRowByName(ctx context.Context, name string) (Workflow, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
+		   FROM workflows WHERE name = ?`, name)
+	w, err := scanWorkflowRow(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Workflow{}, ErrNotFound
+	}
+	return w, err
+}
+
+func (s *Store) countTaskRefs(ctx context.Context, workflowID string) (int, error) {
+	return countTaskRefs(ctx, s.db, workflowID)
+}
+
+func countTaskRefs(ctx context.Context, q queryRower, workflowID string) (int, error) {
+	var refs int
+	if err := q.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM tasks WHERE workflow_id = ?`, workflowID).Scan(&refs); err != nil {
+		return 0, fmt.Errorf("count tasks: %w", err)
+	}
+	return refs, nil
+}
+
+func (s *Store) create(ctx context.Context, def Definition, isSynthetic bool, origin *Origin) (preparedWorkflowCreate, error) {
+	prep, err := s.prepareCreate(ctx, def, isSynthetic)
+	if err != nil {
+		return preparedWorkflowCreate{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return preparedWorkflowCreate{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.insertDefinitionTx(ctx, tx, def, isSynthetic, prep); err != nil {
+		return preparedWorkflowCreate{}, err
+	}
+	if origin != nil {
+		o := *origin
+		o.WorkflowID = prep.workflowID
+		if err := s.upsertOriginTx(ctx, tx, o); err != nil {
+			return preparedWorkflowCreate{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return preparedWorkflowCreate{}, fmt.Errorf("commit: %w", err)
+	}
+	return prep, nil
+}
+
+func (s *Store) prepareCreate(ctx context.Context, def Definition, isSynthetic bool) (preparedWorkflowCreate, error) {
+	if s.db == nil {
+		return preparedWorkflowCreate{}, ErrNotOpen
 	}
 	if err := Validate(ctx, def, s.agent, ValidateOpts{AllowSyntheticName: isSynthetic}); err != nil {
-		return Workflow{}, err
+		return preparedWorkflowCreate{}, err
 	}
 	// Resolve agent names to ids up-front so we fail fast.
 	stepAgents := make(map[string]string, len(def.Steps))
 	for stepName, sd := range def.Steps {
 		a, err := s.agent.GetByName(ctx, sd.AgentName)
 		if err != nil {
-			return Workflow{}, fmt.Errorf("resolve agent %q for step %q: %w", sd.AgentName, stepName, err)
+			return preparedWorkflowCreate{}, fmt.Errorf("resolve agent %q for step %q: %w", sd.AgentName, stepName, err)
 		}
 		stepAgents[stepName] = a.ID
 	}
@@ -136,7 +293,7 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 		return s.workflowIDExists(ctx, candidate)
 	})
 	if err != nil {
-		return Workflow{}, fmt.Errorf("generate workflow id: %w", err)
+		return preparedWorkflowCreate{}, fmt.Errorf("generate workflow id: %w", err)
 	}
 	stepIDs := make(map[string]string, len(def.Steps))
 	for _, name := range orderedStepNames(def) {
@@ -144,22 +301,24 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 			return s.stepIDExists(ctx, candidate)
 		})
 		if err != nil {
-			return Workflow{}, fmt.Errorf("generate step id: %w", err)
+			return preparedWorkflowCreate{}, fmt.Errorf("generate step id: %w", err)
 		}
 		stepIDs[name] = stepID
 	}
+	return preparedWorkflowCreate{
+		workflowID:   wfID,
+		workflowName: def.Name,
+		stepIDs:      stepIDs,
+		stepAgents:   stepAgents,
+	}, nil
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return Workflow{}, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
+func (s *Store) insertDefinitionTx(ctx context.Context, tx *sql.Tx, def Definition, isSynthetic bool, prep preparedWorkflowCreate) error {
 	now := time.Now().Unix()
 
-	firstStepID, ok := stepIDs[def.FirstStep]
+	firstStepID, ok := prep.stepIDs[def.FirstStep]
 	if !ok {
-		return Workflow{}, fmt.Errorf("internal: first_step %q has no id", def.FirstStep)
+		return fmt.Errorf("internal: first_step %q has no id", def.FirstStep)
 	}
 
 	synthetic := 0
@@ -172,16 +331,16 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 		// Validate() also catches user-driven attempts; this guard makes
 		// sure EnsureSingle's invariant stays true even if a programmer
 		// tries to flip the field on a synthetic def.
-		return Workflow{}, fmt.Errorf("synthetic workflow %q cannot use isolation=%q", def.Name, isolation)
+		return fmt.Errorf("synthetic workflow %q cannot use isolation=%q", def.Name, isolation)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflows(id, name, description, first_step_id, is_synthetic, isolation, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, wfID, def.Name, def.Description, firstStepID, synthetic, string(isolation), now); err != nil {
+	`, prep.workflowID, def.Name, def.Description, firstStepID, synthetic, string(isolation), now); err != nil {
 		if isUniqueErr(err, "workflows.name") {
-			return Workflow{}, fmt.Errorf("%w: %s", ErrAlreadyExist, def.Name)
+			return fmt.Errorf("%w: %s", ErrAlreadyExist, def.Name)
 		}
-		return Workflow{}, fmt.Errorf("insert workflow: %w", err)
+		return fmt.Errorf("insert workflow: %w", err)
 	}
 
 	// Two passes: insert ALL steps first (so forward-referencing
@@ -191,12 +350,12 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 		sd := def.Steps[stepName]
 		paramsJSON, perr := marshalAgentParams(sd.AgentParams)
 		if perr != nil {
-			return Workflow{}, fmt.Errorf("marshal agent_params for step %q: %w", stepName, perr)
+			return fmt.Errorf("marshal agent_params for step %q: %w", stepName, perr)
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO steps(id, workflow_id, name, agent_id, seq, agent_params, max_visits) VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, stepIDs[stepName], wfID, stepName, stepAgents[stepName], seq, paramsJSON, sd.MaxVisits); err != nil {
-			return Workflow{}, fmt.Errorf("insert step %q: %w", stepName, err)
+		`, prep.stepIDs[stepName], prep.workflowID, stepName, prep.stepAgents[stepName], seq, paramsJSON, sd.MaxVisits); err != nil {
+			return fmt.Errorf("insert step %q: %w", stepName, err)
 		}
 	}
 	for _, stepName := range names {
@@ -207,9 +366,9 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 				nextID = nil
 				status = tr.TaskStatus
 			} else {
-				nid, ok := stepIDs[tr.Step]
+				nid, ok := prep.stepIDs[tr.Step]
 				if !ok {
-					return Workflow{}, fmt.Errorf("internal: transition %d in step %q targets unknown step %q", i, stepName, tr.Step)
+					return fmt.Errorf("internal: transition %d in step %q targets unknown step %q", i, stepName, tr.Step)
 				}
 				nextID = nid
 				status = nil
@@ -217,16 +376,12 @@ func (s *Store) Create(ctx context.Context, def Definition, isSynthetic bool) (W
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO step_transitions(step_id, next_step_id, task_status, prompt_rule)
 				VALUES (?, ?, ?, ?)
-			`, stepIDs[stepName], nextID, status, tr.PromptRule); err != nil {
-				return Workflow{}, fmt.Errorf("insert transition %d for step %q: %w", i, stepName, err)
+			`, prep.stepIDs[stepName], nextID, status, tr.PromptRule); err != nil {
+				return fmt.Errorf("insert transition %d for step %q: %w", i, stepName, err)
 			}
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return Workflow{}, fmt.Errorf("commit: %w", err)
-	}
-	return s.GetByName(ctx, def.Name)
+	return nil
 }
 
 // GetByName returns a fully-loaded workflow (with steps + transitions),
@@ -235,10 +390,7 @@ func (s *Store) GetByName(ctx context.Context, name string) (Workflow, error) {
 	if s.db == nil {
 		return Workflow{}, ErrNotOpen
 	}
-	row := s.db.QueryRowContext(ctx,
-		`SELECT id, name, description, first_step_id, is_synthetic, isolation, created_at
-		   FROM workflows WHERE name = ?`, name)
-	w, err := scanWorkflowRow(row)
+	w, err := s.getWorkflowRowByName(ctx, name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workflow{}, ErrNotFound
 	}
@@ -291,10 +443,9 @@ func (s *Store) Delete(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	var refs int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM tasks WHERE workflow_id = ?`, w.ID).Scan(&refs); err != nil {
-		return fmt.Errorf("count tasks: %w", err)
+	refs, err := s.countTaskRefs(ctx, w.ID)
+	if err != nil {
+		return err
 	}
 	if refs > 0 {
 		return fmt.Errorf("%w: %d task(s) reference %q", ErrInUse, refs, name)

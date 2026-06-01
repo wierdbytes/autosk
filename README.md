@@ -135,8 +135,14 @@ You can define workflows in JSON and load them into the DB, or install a workflo
 ```bash
 autosk workflow create --file my-flow.json
 autosk workflow install @your-org/workflows --workflow feature-dev
+autosk workflow sync          # materialize enabled global workflows
 autosk workflow list
 ```
+
+`autosk workflow sync` materializes enabled workflows from the global
+registry (`$AUTOSK_WORKFLOWS`, XDG data, then `~/.autosk/workflows`),
+auto-installs referenced scoped agents, and reports conflicts without
+overwriting local same-name workflows.
 
 `autosk init` seeds one workflow for you out of the box —
 `feature-dev-generic` (`dev → review → docs → validator → human`,

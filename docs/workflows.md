@@ -162,9 +162,43 @@ Project databases also keep a `workflow_origins` row for imported or
 seeded workflows. The row records source type/path, source metadata,
 canonical definition hash, revision, active state, and timestamps; it is
 deleted automatically when the workflow row is deleted. This is the
-foundation for global workflow reuse and provenance tracking — the
-current user-facing import commands remain `autosk workflow create` and
-`autosk workflow install`.
+foundation for global workflow reuse and provenance tracking. Use
+`autosk workflow sync` to materialize enabled global registry entries
+into a project.
+
+#### Sync global workflows into a project
+
+`autosk workflow sync` reads the enabled entries in the global workflow
+registry and materializes them into the current project's `.autosk/db`:
+
+```bash
+autosk workflow sync
+autosk workflow sync --dry-run
+autosk workflow sync --force --json
+```
+
+The sync report includes one item per enabled global workflow. Text mode
+prints `workflow <name>: <status>`; `--json` emits `prefix`, `dry_run`,
+`force`, and a `workflows[]` array with `name`, `status`, hashes,
+revision, reason/error text, and any `auto_installed_agents`. Statuses
+are:
+
+| Status | Meaning |
+|---|---|
+| `added` | The enabled global workflow was absent locally and was/would be created with a global origin row. |
+| `noop` | The local global-managed workflow already matches the registry definition hash. |
+| `skipped` | The workflow is intentionally not changed, for example the local origin is inactive or the global hash changed but `--force` was not passed. |
+| `conflict` | A same-name local workflow exists but is not managed by the matching global origin; sync never overwrites it. |
+| `updated` | With `--force`, a changed global-managed workflow was/would be replaced when the store's safety checks allow it. |
+| `error` | The definition could not be loaded, validated, installed, or materialized. |
+
+Referenced scoped npm agents are auto-installed through the same package
+path as `autosk workflow install`. Dry-run mode validates and previews
+without installing agents or writing the DB. Non-dry-run sync records a
+single doltlite commit, `workflow sync global`, when any workflow or
+agent rows were changed. `--force` only replaces workflows already
+managed by the matching active global origin; local same-name conflicts
+and workflows currently in use are reported instead of overwritten.
 
 #### Shipped default: `feature-dev-generic`
 

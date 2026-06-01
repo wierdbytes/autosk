@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **workflow:** `autosk workflow install <package>` installs workflow bundles declared in npm-style packages via `package.json` `autosk.workflows`, with `--workflow`, `--version`, `--no-install`, and `--json` support.
 - **workflow:** add the global workflow registry foundation: canonical workflow definition hashes, `$AUTOSK_WORKFLOWS`/XDG workflow-prefix resolution, registry definition storage, and project-level workflow provenance rows.
+- **workflow:** `autosk workflow sync` materializes enabled global workflows into a project, auto-installs referenced scoped agents, supports `--dry-run`/`--force`, reports added/noop/skipped/conflict/updated/error outcomes, and commits one doltlite change per mutating sync run.
 
 ### Changed
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
