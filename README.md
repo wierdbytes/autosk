@@ -63,11 +63,12 @@ Here you can press `n` to create new task or `?` to see hotkeys.
    ```
 
    The first write verb in a fresh directory prompts you to create
-   `.autosk/db` and seeds the default `feature-dev-generic` workflow
-   (see [How it works → Workflows](#workflows)). Press `Enter` (or `y`)
-   to accept; press `n` to abort. `autosk init` is the explicit form
-   and is idempotent; pass `--skip-bootstrap` if you don't want the
-   default workflow seeded (handy for tests and offline CI). Scripts
+   `.autosk/db`, seeds the default `feature-dev-generic` workflow, and
+   syncs enabled global workflows (see [How it works → Workflows](#workflows)).
+   Press `Enter` (or `y`) to accept; press `n` to abort. `autosk init`
+   is the explicit form and is idempotent; pass `--skip-bootstrap` to
+   skip only the built-in seed, or add `--skip-global-workflows` for a
+   truly empty workflow table (handy for tests and offline CI). Scripts
    and CI auto-accept silently — see `AUTOSK_AUTOINIT_*` in
    [docs/workflows.md](docs/workflows.md#implicit-auto-init-from-other-verbs).
 

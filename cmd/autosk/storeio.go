@@ -99,9 +99,12 @@ func openStore(ctx context.Context, writeOK bool) (store.Store, func(), error) {
 		// path leaves the same state as an explicit init:
 		//   1. Ensure the global packages prefix exists (best-effort).
 		//   2. Seed the bootstrap workflow (best-effort).
-		// Both steps are skipped when the operator opted out via
-		// AUTOSK_AUTOINIT_SKIP_BOOTSTRAP; that env covers the test
-		// helpers and any pipeline that wants a strictly minimal DB.
+		//   3. Sync enabled global workflows (best-effort).
+		// Steps 2 and 3 can be suppressed independently:
+		//   - AUTOSK_AUTOINIT_SKIP_BOOTSTRAP skips the built-in workflow seed.
+		//   - AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS skips global workflow sync.
+		// These env vars cover test helpers and pipelines that want a
+		// strictly minimal DB or need to avoid npm/registry touches.
 		if os.Getenv(EnvAutoInitSkipBootstrap) == "" {
 			if reg, perr := openPackagesRegistry(); perr == nil {
 				if err := reg.EnsurePrefix(); err != nil && !flagQuiet {
@@ -114,6 +117,16 @@ func openStore(ctx context.Context, writeOK bool) (store.Store, func(), error) {
 				fmt.Fprintf(os.Stderr,
 					"warning: could not bootstrap default workflow: %v (set %s=1 to suppress this step)\n",
 					berr, EnvAutoInitSkipBootstrap)
+			}
+		}
+		if os.Getenv(EnvAutoInitSkipGlobalWorkflows) == "" {
+			// Suppress the sync report to stdout when the outer command
+			// runs with --json, so auto-init does not break the
+			// one-JSON-document contract. Warnings still land on stderr.
+			if serr := syncGlobalWorkflows(ctx, s, flagJSON); serr != nil {
+				fmt.Fprintf(os.Stderr,
+					"warning: could not sync global workflows: %v (set %s=1 to suppress this step)\n",
+					serr, EnvAutoInitSkipGlobalWorkflows)
 			}
 		}
 	}

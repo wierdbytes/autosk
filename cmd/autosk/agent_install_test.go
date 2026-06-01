@@ -176,6 +176,9 @@ func runRoot(t *testing.T, dir string, argv ...string) (string, error) {
 	if _, set := os.LookupEnv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP"); !set {
 		t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "1")
 	}
+	if _, set := os.LookupEnv("AUTOSK_WORKFLOWS"); !set {
+		t.Setenv("AUTOSK_WORKFLOWS", filepath.Join(t.TempDir(), "workflows"))
+	}
 	root := newRootCmd()
 	root.SetArgs(argv)
 	// emit* helpers write to os.Stdout directly; capture via pipe.

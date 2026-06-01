@@ -13,6 +13,7 @@ import (
 	"autosk/internal/agent"
 	"autosk/internal/agent/pkgregistry"
 	"autosk/internal/bootstrap"
+	"autosk/internal/globalworkflow"
 	"autosk/internal/projectdb"
 	"autosk/internal/store/doltlite"
 	"autosk/internal/workflow"
@@ -23,8 +24,9 @@ import (
 // first run (see `internal/bootstrap`).
 func newInitCmd() *cobra.Command {
 	var (
-		prefix        string
-		skipBootstrap bool
+		prefix              string
+		skipBootstrap       bool
+		skipGlobalWorkflows bool
 	)
 	cmd := &cobra.Command{
 		Use:   "init",
@@ -46,7 +48,10 @@ optional unless you want the default workflow seeded or you want to set
 a custom ID prefix (not yet implemented).
 
 Use --skip-bootstrap to opt out of the workflow seed (useful for tests,
-CI and offline machines).`,
+CI and offline machines).
+
+Use --skip-global-workflows to opt out of syncing enabled global workflows
+into the project.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if prefix != "" {
@@ -101,12 +106,21 @@ CI and offline machines).`,
 						err)
 				}
 			}
+			if !skipGlobalWorkflows {
+				if err := syncGlobalWorkflows(cmd.Context(), s, false); err != nil {
+					fmt.Fprintf(os.Stderr,
+						"warning: could not sync global workflows: %v (re-run with --skip-global-workflows to opt out)\n",
+						err)
+				}
+			}
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&prefix, "prefix", "", "ID prefix (reserved; currently always 'as')")
 	cmd.Flags().BoolVar(&skipBootstrap, "skip-bootstrap", false,
 		"do not seed the default feature-dev-generic workflow")
+	cmd.Flags().BoolVar(&skipGlobalWorkflows, "skip-global-workflows", false,
+		"do not sync enabled global workflows into this project")
 	return cmd
 }
 
@@ -210,6 +224,37 @@ func bootstrapDefaultWorkflow(ctx context.Context, s *doltlite.Store) error {
 		} else {
 			fmt.Printf("bootstrapped workflow %s\n", w.Name)
 		}
+	}
+	return nil
+}
+
+// syncGlobalWorkflows materializes enabled global workflows into the
+// current project. Failures are non-fatal; the function returns an
+// error that callers should print as a warning.
+//
+// When suppressReport is true, emitWorkflowSyncReport is skipped even
+// in non-quiet mode. This is used by the auto-init path (openStore)
+// when the outer command runs with --json, so the sync report does
+// not break the one-JSON-document contract on stdout.
+func syncGlobalWorkflows(ctx context.Context, s *doltlite.Store, suppressReport bool) error {
+	reg, err := globalworkflow.Default()
+	if err != nil {
+		return fmt.Errorf("open global workflow registry: %w", err)
+	}
+	wf := workflow.New(s.DB(), agent.New(s.DB()))
+	report, err := globalworkflow.SyncGlobalWorkflows(ctx, reg, wf, globalworkflow.SyncOptions{
+		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+			return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), s)
+		},
+	})
+	if !flagQuiet && !suppressReport {
+		_ = emitWorkflowSyncReport(report)
+	}
+	if report.Mutated() {
+		_ = s.DoltCommit(ctx, "workflow sync global")
+	}
+	if err != nil {
+		return renderWorkflowSyncError(err, report)
 	}
 	return nil
 }

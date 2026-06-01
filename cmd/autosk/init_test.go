@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"autosk/internal/globalworkflow"
 	"autosk/internal/worktree"
 )
 
@@ -441,6 +442,171 @@ func TestInit_QuietDoesNotSwallowBootstrapWarning(t *testing.T) {
 	}
 	if !strings.Contains(out, "--skip-bootstrap") {
 		t.Errorf("init bootstrap warning should advertise --skip-bootstrap under --quiet; got:\n%q", out)
+	}
+}
+
+// TestInit_SyncsGlobalWorkflows covers that explicit init syncs enabled
+// global workflows after bootstrap.
+func TestInit_SyncsGlobalWorkflows(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected bootstrap line:\n%s", out)
+	}
+	if !strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("expected global workflow sync line:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "feature-dev-generic") {
+		t.Errorf("workflow list missing bootstrap workflow:\n%s", list)
+	}
+	if !strings.Contains(list, "global-wf") {
+		t.Errorf("workflow list missing synced global workflow:\n%s", list)
+	}
+}
+
+// TestInit_SkipGlobalWorkflows covers that --skip-global-workflows
+// suppresses the global workflow sync step while still running bootstrap.
+func TestInit_SkipGlobalWorkflows(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "init", "--skip-global-workflows")
+	if err != nil {
+		t.Fatalf("init --skip-global-workflows: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected bootstrap line:\n%s", out)
+	}
+	if strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("--skip-global-workflows should not sync global workflows:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "feature-dev-generic") {
+		t.Errorf("workflow list missing bootstrap workflow:\n%s", list)
+	}
+	if strings.Contains(list, "global-wf") {
+		t.Errorf("--skip-global-workflows should leave global workflow absent:\n%s", list)
+	}
+}
+
+// TestInit_SkipBootstrapStillSyncsGlobalWorkflows ensures that
+// --skip-bootstrap only suppresses the built-in bootstrap, not the
+// global workflow sync.
+func TestInit_SkipBootstrapStillSyncsGlobalWorkflows(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "human", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "init", "--skip-bootstrap")
+	if err != nil {
+		t.Fatalf("init --skip-bootstrap: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("--skip-bootstrap should not bootstrap:\n%s", out)
+	}
+	if !strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("expected global workflow sync line:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if strings.Contains(list, "feature-dev-generic") {
+		t.Errorf("--skip-bootstrap should leave bootstrap workflow absent:\n%s", list)
+	}
+	if !strings.Contains(list, "global-wf") {
+		t.Errorf("workflow list missing synced global workflow:\n%s", list)
+	}
+}
+
+// TestInit_GlobalWorkflowSyncFailureNonFatal covers that a global
+// workflow sync failure (e.g., uninstalled agent that can't be
+// auto-installed) is a warning, not a fatal error.
+func TestInit_GlobalWorkflowSyncFailureNonFatal(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("bad-global", "@noone/here", "bad global")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "init")
+	if err != nil {
+		t.Fatalf("init should exit 0 on global workflow sync failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected a 'warning' line on stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "sync global workflows") {
+		t.Errorf("expected the global-workflow-sync-flavour warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "--skip-global-workflows") {
+		t.Errorf("global workflow sync warning should advertise --skip-global-workflows; got:\n%s", out)
+	}
+	if !strings.Contains(out, "initialized") {
+		t.Errorf("init should still report 'initialized':\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".autosk", "db")); err != nil {
+		t.Errorf(".autosk/db missing after failed sync: %v", err)
+	}
+}
+
+// TestInit_GlobalWorkflowSyncFailureNonFatal_Quiet covers the quiet
+// path: even though emitWorkflowSyncReport is suppressed, the warning
+// on stderr must still carry actionable per-workflow failure details
+// produced by renderWorkflowSyncError so operators can diagnose the
+// issue without re-running.
+func TestInit_GlobalWorkflowSyncFailureNonFatal_Quiet(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("bad-global", "@noone/here", "bad global")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "--quiet", "init")
+	if err != nil {
+		t.Fatalf("init --quiet should exit 0 on global workflow sync failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected a 'warning' line on stderr under --quiet:\n%q", out)
+	}
+	if !strings.Contains(out, "sync global workflows") {
+		t.Errorf("expected the global-workflow-sync-flavour warning under --quiet, got:\n%q", out)
+	}
+	// The rendered error must include the workflow name and the failure
+	// reason so the warning is actionable even without the report table.
+	if !strings.Contains(out, "bad-global") {
+		t.Errorf("quiet warning should name the failing workflow; got:\n%q", out)
+	}
+	if !strings.Contains(out, "--skip-global-workflows") {
+		t.Errorf("quiet warning should advertise --skip-global-workflows; got:\n%q", out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".autosk", "db")); err != nil {
+		t.Errorf(".autosk/db missing after failed sync under --quiet: %v", err)
 	}
 }
 

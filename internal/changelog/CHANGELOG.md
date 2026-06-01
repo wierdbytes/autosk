@@ -8,10 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **init:** `autosk init` now syncs enabled global workflows into the project after bootstrap (same behavior as `autosk workflow sync`). Add `--skip-global-workflows` to opt out.
+- **init:** `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS` environment variable suppresses global-workflow sync during write-command auto-init (mirrors the explicit `--skip-global-workflows` flag).
 - **workflow:** `autosk workflow install <package>` installs workflow bundles declared in npm-style packages via `package.json` `autosk.workflows`, with `--workflow`, `--version`, `--no-install`, and `--json` support.
 - **workflow:** add the global workflow registry foundation: canonical workflow definition hashes, `$AUTOSK_WORKFLOWS`/XDG workflow-prefix resolution, registry definition storage, and project-level workflow provenance rows.
 
 ### Changed
+- **init:** write-command auto-init now runs the same three post-migrate steps as explicit `autosk init`: ensure packages prefix, bootstrap `feature-dev-generic`, and sync enabled global workflows. `--skip-bootstrap` and `AUTOSK_AUTOINIT_SKIP_BOOTSTRAP` remain scoped to the built-in seed only; use `--skip-global-workflows` / `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS` to skip global workflow sync.
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
 - **bootstrap:** `autosk init` now reconciles managed `feature-dev-generic` revisions by canonical hash while preserving unmanaged same-name workflows as no-ops.
 - **workflow:** `autosk workflow show` / `--json` now include `superseded_by` / `superseded_by_id` for superseded workflow revisions, and workflow names containing `@rev-` are reserved for autosk internals.

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"autosk/internal/globalworkflow"
 )
 
 // withInteractiveStdin swaps the package-level TTY check + stdin
@@ -260,6 +263,155 @@ func TestAutoInit_ExistingDBNoPrompt(t *testing.T) {
 	}
 	if strings.Contains(out, "Create a new autosk database") {
 		t.Errorf("existing DB must not trigger the prompt:\n%s", out)
+	}
+}
+
+// TestAutoInit_SyncsGlobalWorkflows covers that auto-init from a write
+// verb syncs enabled global workflows after bootstrap.
+func TestAutoInit_SyncsGlobalWorkflows(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if !strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("expected global workflow sync line:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "global-wf") {
+		t.Errorf("workflow list missing synced global workflow:\n%s", list)
+	}
+}
+
+// TestAutoInit_SkipGlobalWorkflowsEnv covers the
+// AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out: a write verb on a
+// fresh dir still creates the DB and bootstraps, but leaves global
+// workflows unsynced.
+func TestAutoInit_SkipGlobalWorkflowsEnv(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS", "1")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS should not sync global workflows:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if strings.Contains(list, "global-wf") {
+		t.Errorf("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS should leave global workflow absent:\n%s", list)
+	}
+}
+
+// TestAutoInit_GlobalWorkflowSyncFailureNonFatal covers that a global
+// workflow sync failure during auto-init is a warning, not a fatal
+// error: the write command still succeeds, the DB is created, and the
+// warning mentions the AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out.
+func TestAutoInit_GlobalWorkflowSyncFailureNonFatal(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("bad-global", "@noone/here", "bad global")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir should succeed despite sync failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected a 'warning' line on stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "sync global workflows") {
+		t.Errorf("expected the global-workflow-sync-flavour warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS") {
+		t.Errorf("warning should advertise AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out; got:\n%s", out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to still bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, ".autosk", "db")); serr != nil {
+		t.Errorf(".autosk/db not created after auto-init with sync failure: %v", serr)
+	}
+	// Verify the task was actually created.
+	list, err := runRoot(t, dir, "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "smoke") {
+		t.Errorf("task 'smoke' should exist after auto-init:\n%s", list)
+	}
+}
+
+// TestAutoInit_JSONCreatesSingleJSONDocument is a regression test for
+// the auto-init path when the outer command runs with --json.
+// syncGlobalWorkflows must not emit its own JSON report to stdout,
+// because that would produce two concatenated JSON documents and break
+// consumers expecting a single task JSON object.
+func TestAutoInit_JSONCreatesSingleJSONDocument(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "--json", "create", "smoke")
+	if err != nil {
+		t.Fatalf("--json create on fresh dir: %v\n%s", err, out)
+	}
+	// Count JSON-object-looking lines. There must be exactly one
+	// (the task JSON from create --json). A regression where
+	// emitWorkflowSyncReport also wrote to stdout would add a second.
+	var jsonLines []string
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			jsonLines = append(jsonLines, trimmed)
+		}
+	}
+	if len(jsonLines) != 1 {
+		t.Fatalf("expected exactly one JSON object in output, got %d:\n%s", len(jsonLines), out)
+	}
+	var task map[string]any
+	if err := json.Unmarshal([]byte(jsonLines[0]), &task); err != nil {
+		t.Fatalf("task JSON is invalid: %v\nraw:\n%s", err, jsonLines[0])
+	}
+	if task["title"] != "smoke" {
+		t.Errorf("expected task title 'smoke', got %v", task["title"])
 	}
 }
 
