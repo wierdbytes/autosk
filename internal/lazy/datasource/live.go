@@ -218,6 +218,12 @@ func (l *Live) StreamLive(ctx context.Context, jobID string) (*LiveHandle, error
 	return NewLiveHandle(ch, func() error { h.Close(); return nil }), nil
 }
 
+// SyncWorkflows forwards to the offline base; the daemon has no
+// global-workflow sync endpoint.
+func (l *Live) SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncReport, error) {
+	return l.Offline.SyncWorkflows(ctx, dryRun, force)
+}
+
 // InstallAgent / UninstallAgent: still no daemon endpoint for these,
 // so they return ErrDaemonRequired even in Live mode. (The agent
 // install verb shells out to `autosk agent install` outside the

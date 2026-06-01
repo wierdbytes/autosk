@@ -190,6 +190,9 @@ func (c *Compose) DeleteWorkflow(ctx context.Context, name string) error {
 func (c *Compose) UpdateWorkflowIsolation(ctx context.Context, name, mode string, force bool) (UpdateIsolationReport, error) {
 	return c.off.UpdateWorkflowIsolation(ctx, name, mode, force)
 }
+func (c *Compose) SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncReport, error) {
+	return c.off.SyncWorkflows(ctx, dryRun, force)
+}
 func (c *Compose) InstallAgent(ctx context.Context, name, version string) error {
 	if c.usingLive() {
 		return c.live.InstallAgent(ctx, name, version)

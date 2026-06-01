@@ -28,6 +28,7 @@ func (f *debounceFakeDS) StreamLive(_ context.Context, jobID string) (*datasourc
 	return datasource.NewLiveHandle(ch, func() error { close(ch); return nil }), nil
 }
 
+func (*debounceFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func newDebounceGui(t *testing.T) (*Gui, *debounceFakeDS) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

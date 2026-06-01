@@ -59,6 +59,98 @@ func TestRenderWorkflowsPanel_NonIsolatedUnchanged(t *testing.T) {
 	}
 }
 
+// TestRenderWorkflowsPanel_GlobalMarkers verifies that [global],
+// [stale], and [rev:X] badges appear in the Workflows panel.
+func TestRenderWorkflowsPanel_GlobalMarkers(t *testing.T) {
+	wfs := []datasource.Workflow{
+		{Name: "global-up-to-date", SourceType: "global", Isolation: "none", FirstStep: "dev"},
+		{Name: "global-stale", SourceType: "global", IsStale: true, Isolation: "none", FirstStep: "dev"},
+		{Name: "global-with-rev", SourceType: "global", Revision: "rev-abc123", Isolation: "none", FirstStep: "dev"},
+		{Name: "plain-local", Isolation: "none", FirstStep: "dev"},
+	}
+	out, _ := renderWorkflowsPanel(wfs, 0, "")
+	visible := ansiutil.Strip(out)
+	lines := strings.Split(strings.TrimRight(visible, "\n"), "\n")
+	if len(lines) != len(wfs) {
+		t.Fatalf("expected %d lines, got %d:\n%s", len(wfs), len(lines), visible)
+	}
+	if !strings.Contains(lines[0], "[global]") {
+		t.Errorf("global-up-to-date missing [global]:\n%q", lines[0])
+	}
+	if strings.Contains(lines[0], "[stale]") {
+		t.Errorf("global-up-to-date should NOT carry [stale]:\n%q", lines[0])
+	}
+	if !strings.Contains(lines[1], "[global]") {
+		t.Errorf("global-stale missing [global]:\n%q", lines[1])
+	}
+	if !strings.Contains(lines[1], "[stale]") {
+		t.Errorf("global-stale missing [stale]:\n%q", lines[1])
+	}
+	if !strings.Contains(lines[2], "[rev:rev-abc123]") {
+		t.Errorf("global-with-rev missing [rev:rev-abc123]:\n%q", lines[2])
+	}
+	if strings.Contains(lines[3], "[global]") || strings.Contains(lines[3], "[stale]") {
+		t.Errorf("plain-local should NOT carry global/stale markers:\n%q", lines[3])
+	}
+}
+
+// TestRenderWorkflowDetail_OriginSection verifies that the Detail
+// pane renders source type, source, revision, and hash for managed
+// workflows, and uses styleWarn for [stale].
+func TestRenderWorkflowDetail_OriginSection(t *testing.T) {
+	w := datasource.Workflow{
+		Name: "global-wf", SourceType: "global", Source: "global-wf",
+		DefinitionHash: "abc123", Revision: "rev-1",
+		Isolation: "none", FirstStep: "dev",
+	}
+	out := renderWorkflowDetail(w, 80)
+	visible := ansiutil.Strip(out)
+	if !strings.Contains(visible, "source: global") {
+		t.Errorf("missing source line:\n%s", visible)
+	}
+	if !strings.Contains(visible, "(global-wf)") {
+		t.Errorf("missing source name:\n%s", visible)
+	}
+	if !strings.Contains(visible, "revision: rev-1") {
+		t.Errorf("missing revision line:\n%s", visible)
+	}
+	if !strings.Contains(visible, "hash: abc123") {
+		t.Errorf("missing hash line:\n%s", visible)
+	}
+	// Revision chip in header.
+	if !strings.Contains(visible, "[rev:rev-1]") {
+		t.Errorf("missing [rev:rev-1] chip in header:\n%s", visible)
+	}
+
+	// Stale workflow: [global] and [stale] chips appear in header.
+	w.IsStale = true
+	out = renderWorkflowDetail(w, 80)
+	visible = ansiutil.Strip(out)
+	if !strings.Contains(visible, "[global]") {
+		t.Errorf("stale workflow missing [global] chip:\n%s", visible)
+	}
+	if !strings.Contains(visible, "[stale]") {
+		t.Errorf("stale workflow missing [stale] chip:\n%s", visible)
+	}
+
+	// Long revision is truncated to 12 chars in the header chip.
+	w.IsStale = false
+	w.Revision = "a-very-long-revision-string"
+	out = renderWorkflowDetail(w, 80)
+	visible = ansiutil.Strip(out)
+	if !strings.Contains(visible, "[rev:a-very-long-]") {
+		t.Errorf("long revision not truncated to 12 chars in header; got:\n%s", visible)
+	}
+
+	// Local workflow: no origin lines.
+	local := datasource.Workflow{Name: "local", Isolation: "none", FirstStep: "dev"}
+	out = renderWorkflowDetail(local, 80)
+	visible = ansiutil.Strip(out)
+	if strings.Contains(visible, "source:") {
+		t.Errorf("local workflow should NOT render source line:\n%s", visible)
+	}
+}
+
 // TestRenderWorkflowDetail_IsolationLine pins the new header-chip
 // behaviour for the workflow Detail pane:
 //

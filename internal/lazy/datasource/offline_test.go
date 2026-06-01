@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"autosk/internal/agent"
+	"autosk/internal/globalworkflow"
 	"autosk/internal/lazy/datasource"
 	"autosk/internal/store"
 	"autosk/internal/store/doltlite"
@@ -250,6 +251,294 @@ func TestOffline_StreamLiveReturnsErrDaemonRequired(t *testing.T) {
 	_, err := ds.StreamLive(ctx, "job-xxxx")
 	if err != datasource.ErrDaemonRequired {
 		t.Fatalf("want ErrDaemonRequired, got %v", err)
+	}
+}
+
+// TestOffline_Workflows_OriginFields verifies that the Workflows list
+// surfaces origin metadata (source_type, source, hash, revision) and
+// computes IsStale by comparing the local hash with the global registry.
+func TestOffline_Workflows_OriginFields(t *testing.T) {
+	ctx := context.Background()
+	ds, ts, closeFn := newOfflineFx(t)
+	defer closeFn()
+
+	// Seed a workflow with a global origin.
+	ag := agent.New(ts.DB())
+	if _, err := ag.EnsureByName(ctx, "human"); err != nil {
+		t.Fatalf("ensure human: %v", err)
+	}
+	ws := workflow.New(ts.DB(), ag)
+	def, _ := workflow.ParseReader(strings.NewReader(`{"name":"global-wf","first_step":"do","steps":{"do":{"agent":{"name":"human"},"next_steps":[{"step":"do","prompt_rule":"."}]}}}`))
+	realHash, err := workflow.HashDefinition(def)
+	if err != nil {
+		t.Fatalf("hash definition: %v", err)
+	}
+	wf, err := ws.CreateWithOrigin(ctx, def, false, workflow.Origin{
+		SourceType:     "global",
+		Source:         "global-wf",
+		DefinitionHash: realHash,
+		Revision:       "rev-1",
+	})
+	if err != nil {
+		t.Fatalf("create with origin: %v", err)
+	}
+
+	// Isolate from the developer/CI machine's real default global
+	// workflow registry so the "registry missing" case is hermetic.
+	t.Setenv("AUTOSK_WORKFLOWS", t.TempDir())
+
+	// Without a global registry the workflow should still report its
+	// origin but be marked stale (registry missing).
+	wfs, err := ds.Workflows(ctx, true)
+	if err != nil {
+		t.Fatalf("workflows: %v", err)
+	}
+	var found datasource.Workflow
+	for _, w := range wfs {
+		if w.ID == wf.ID {
+			found = w
+			break
+		}
+	}
+	if found.ID == "" {
+		t.Fatal("workflow not found in list")
+	}
+	if found.SourceType != "global" {
+		t.Fatalf("SourceType=%q want global", found.SourceType)
+	}
+	if found.Source != "global-wf" {
+		t.Fatalf("Source=%q want global-wf", found.Source)
+	}
+	if found.DefinitionHash != realHash {
+		t.Fatalf("DefinitionHash=%q want %s", found.DefinitionHash, realHash)
+	}
+	if found.Revision != "rev-1" {
+		t.Fatalf("Revision=%q want rev-1", found.Revision)
+	}
+	if !found.IsStale {
+		t.Fatal("expected IsStale=true when global registry is missing")
+	}
+
+	// Create a matching global registry entry with the SAME hash.
+	globalDir := t.TempDir()
+	t.Setenv("AUTOSK_WORKFLOWS", globalDir)
+	reg, err := globalworkflow.Default()
+	if err != nil {
+		t.Fatalf("global registry: %v", err)
+	}
+	if err := reg.EnsurePrefix(); err != nil {
+		t.Fatalf("ensure prefix: %v", err)
+	}
+	// Store the definition with the same hash.
+	if _, err := reg.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatalf("store definition: %v", err)
+	}
+
+	wfs2, err := ds.Workflows(ctx, true)
+	if err != nil {
+		t.Fatalf("workflows second: %v", err)
+	}
+	for _, w := range wfs2 {
+		if w.ID == wf.ID {
+			found = w
+			break
+		}
+	}
+	if found.IsStale {
+		t.Fatal("expected IsStale=false when hashes match")
+	}
+
+	// Update the global registry with a different hash.
+	def2, _ := workflow.ParseReader(strings.NewReader(`{"name":"global-wf","first_step":"do","steps":{"do":{"agent":{"name":"human"},"next_steps":[{"step":"extra","prompt_rule":"."}]},"extra":{"agent":{"name":"human"},"next_steps":[{"step":"do","prompt_rule":"."}]}}}`))
+	if _, err := reg.StoreDefinition(def2, globalworkflow.StoreOptions{Revision: "rev-2"}); err != nil {
+		t.Fatalf("store definition 2: %v", err)
+	}
+
+	wfs3, err := ds.Workflows(ctx, true)
+	if err != nil {
+		t.Fatalf("workflows third: %v", err)
+	}
+	for _, w := range wfs3 {
+		if w.ID == wf.ID {
+			found = w
+			break
+		}
+	}
+	if !found.IsStale {
+		t.Fatal("expected IsStale=true after global hash changed")
+	}
+}
+
+// TestOffline_Workflows_DisabledGlobalNotStale verifies that a
+// disabled global registry entry with a matching hash does NOT
+// produce a false [stale] marker. Only hash mismatches or missing
+// entries should trigger IsStale=true.
+func TestOffline_Workflows_DisabledGlobalNotStale(t *testing.T) {
+	ctx := context.Background()
+	ds, ts, closeFn := newOfflineFx(t)
+	defer closeFn()
+
+	ag := agent.New(ts.DB())
+	if _, err := ag.EnsureByName(ctx, "human"); err != nil {
+		t.Fatalf("ensure human: %v", err)
+	}
+	ws := workflow.New(ts.DB(), ag)
+	def, _ := workflow.ParseReader(strings.NewReader(`{"name":"global-wf","first_step":"do","steps":{"do":{"agent":{"name":"human"},"next_steps":[{"step":"do","prompt_rule":"."}]}}}`))
+	realHash, err := workflow.HashDefinition(def)
+	if err != nil {
+		t.Fatalf("hash definition: %v", err)
+	}
+	wf, err := ws.CreateWithOrigin(ctx, def, false, workflow.Origin{
+		SourceType:     "global",
+		Source:         "global-wf",
+		DefinitionHash: realHash,
+		Revision:       "rev-1",
+	})
+	if err != nil {
+		t.Fatalf("create with origin: %v", err)
+	}
+
+	// Seed a global registry entry with the same hash, then disable it.
+	globalDir := t.TempDir()
+	t.Setenv("AUTOSK_WORKFLOWS", globalDir)
+	reg, err := globalworkflow.Default()
+	if err != nil {
+		t.Fatalf("global registry: %v", err)
+	}
+	if err := reg.EnsurePrefix(); err != nil {
+		t.Fatalf("ensure prefix: %v", err)
+	}
+	if _, err := reg.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatalf("store definition: %v", err)
+	}
+	if _, err := reg.Disable("global-wf"); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	wfs, err := ds.Workflows(ctx, true)
+	if err != nil {
+		t.Fatalf("workflows: %v", err)
+	}
+	var found datasource.Workflow
+	for _, w := range wfs {
+		if w.ID == wf.ID {
+			found = w
+			break
+		}
+	}
+	if found.ID == "" {
+		t.Fatal("workflow not found in list")
+	}
+	if found.IsStale {
+		t.Fatal("expected IsStale=false when disabled global entry hash matches")
+	}
+
+	// Now change the global hash; even disabled, it should flip stale.
+	def2, _ := workflow.ParseReader(strings.NewReader(`{"name":"global-wf","first_step":"do","steps":{"do":{"agent":{"name":"human"},"next_steps":[{"step":"extra","prompt_rule":"."}]},"extra":{"agent":{"name":"human"},"next_steps":[{"step":"do","prompt_rule":"."}]}}}`))
+	if _, err := reg.StoreDefinition(def2, globalworkflow.StoreOptions{Revision: "rev-2"}); err != nil {
+		t.Fatalf("store definition 2: %v", err)
+	}
+	// Re-disable because StoreDefinition re-enables.
+	if _, err := reg.Disable("global-wf"); err != nil {
+		t.Fatalf("re-disable: %v", err)
+	}
+
+	wfs2, err := ds.Workflows(ctx, true)
+	if err != nil {
+		t.Fatalf("workflows second: %v", err)
+	}
+	for _, w := range wfs2 {
+		if w.ID == wf.ID {
+			found = w
+			break
+		}
+	}
+	if !found.IsStale {
+		t.Fatal("expected IsStale=true after global hash changed (still disabled)")
+	}
+}
+
+// TestOffline_SyncWorkflows_MaterializesGlobal verifies that
+// SyncWorkflows uses the same code path as the CLI and returns a
+// report the TUI can surface.
+func TestOffline_SyncWorkflows_MaterializesGlobal(t *testing.T) {
+	ctx := context.Background()
+	ds, ts, closeFn := newOfflineFx(t)
+	defer closeFn()
+
+	// Seed a global workflow.
+	globalDir := t.TempDir()
+	t.Setenv("AUTOSK_WORKFLOWS", globalDir)
+	reg, err := globalworkflow.Default()
+	if err != nil {
+		t.Fatalf("global registry: %v", err)
+	}
+	if err := reg.EnsurePrefix(); err != nil {
+		t.Fatalf("ensure prefix: %v", err)
+	}
+	ag := agent.New(ts.DB())
+	if _, err := ag.EnsureByName(ctx, "human"); err != nil {
+		t.Fatalf("ensure human: %v", err)
+	}
+	def, _ := workflow.ParseReader(strings.NewReader(`{"name":"sync-wf","first_step":"do","steps":{"do":{"agent":{"name":"human"},"next_steps":[{"step":"do","prompt_rule":"."}]}}}`))
+	if _, err := reg.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "r1"}); err != nil {
+		t.Fatalf("store definition: %v", err)
+	}
+
+	// Sync should materialize it.
+	rep, err := ds.SyncWorkflows(ctx, false, false)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if !rep.Mutated() {
+		t.Fatal("expected sync to mutate")
+	}
+	if len(rep.Workflows) != 1 {
+		t.Fatalf("expected 1 workflow report, got %d", len(rep.Workflows))
+	}
+	if rep.Workflows[0].Name != "sync-wf" {
+		t.Fatalf("name=%q want sync-wf", rep.Workflows[0].Name)
+	}
+	if rep.Workflows[0].Status != "added" {
+		t.Fatalf("status=%q want added", rep.Workflows[0].Status)
+	}
+
+	// Second sync should be noop.
+	rep2, err := ds.SyncWorkflows(ctx, false, false)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+	if rep2.Mutated() {
+		t.Fatal("expected second sync to be noop")
+	}
+	if len(rep2.Workflows) != 1 || rep2.Workflows[0].Status != "noop" {
+		t.Fatalf("second sync status=%q want noop", rep2.Workflows[0].Status)
+	}
+
+	// Dry-run should not mutate.
+	rep3, err := ds.SyncWorkflows(ctx, true, false)
+	if err != nil {
+		t.Fatalf("dry-run sync: %v", err)
+	}
+	if rep3.Mutated() {
+		t.Fatal("dry-run should not mutate")
+	}
+	if !rep3.DryRun {
+		t.Fatal("DryRun flag not set")
+	}
+
+	// Verify the workflow exists in the DB.
+	ws := workflow.New(ts.DB(), ag)
+	wf, err := ws.GetByName(ctx, "sync-wf")
+	if err != nil {
+		t.Fatalf("get by name: %v", err)
+	}
+	origin, err := ws.GetOrigin(ctx, wf.ID)
+	if err != nil {
+		t.Fatalf("get origin: %v", err)
+	}
+	if origin.SourceType != "global" {
+		t.Fatalf("origin.SourceType=%q want global", origin.SourceType)
 	}
 }
 

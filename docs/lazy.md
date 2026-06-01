@@ -74,16 +74,21 @@ The Detail pane always reflects the focused side panel:
   `session:` / `error:`), then one labelled box per transcript event,
   oldest first. For a running job a 6-row `input` textarea is
   pinned below the transcript.
-- **Workflows** — header line `<name> [wt]? first step: <step>`
+- **Workflows** — header line `<name> [wt]? [global]? [stale]? [rev:X]? first step: <step>`
   (the `[wt]` chip appears iff the workflow is non-synthetic and its
-  isolation is `worktree`), the description rendered as markdown,
+  isolation is `worktree`; `[global]` appears for global-managed
+  workflows; `[stale]` appears when the local definition no longer
+  matches the global registry; `[rev:X]` shows the workflow revision
+  truncated to 12 characters), the description rendered as markdown,
   then a `Steps (N)` labelled box (same chrome as `Recent signals
   (N)` on the task pane) with one row per step in
   `<step> agent=<agent> next=<targets|(none)>` form. Columns are
   aligned: the `agent=` chip starts at the same column on every
   row, and the `next=` chip likewise. Sibling-step targets render
   in the step hue; lifecycle terminals (`done` / `cancel` /
-  `human`) take their task-status hue.
+  `human`) take their task-status hue. The origin section below the
+  description shows `source: <type> (<name>)`, `revision: <rev>`,
+  and `hash: <hash>` for managed workflows.
 - **Agents** — package name, version, install source (`builtin`,
   `installed`, or `db_only` when a referenced package isn't
   installed locally), and config summary.
@@ -212,12 +217,19 @@ stream.
 | `n` | Create from a JSON file — prompts for the path. |
 | `D` | Delete (confirms). |
 | `i` | Update **isolation** (`none` ↔ `worktree`). Opens a two-option menu with the current mode marked. Selecting the current value closes the popup silently. Selecting the other value chains into a confirm popup that enumerates affected non-terminal tasks (capped at 10 with a `… and N more` suffix); `y` invokes `UpdateWorkflowIsolation(…, force=true)`. Synthetic `single:*` rows drop a status-bar flash (`isolation is locked to 'none' on synthetic workflows`) and do NOT open the menu. Routes through the same `workflow.Store.UpdateIsolation` the CLI uses — see [docs/workflows.md § Updating isolation](workflows.md#updating-isolation) for the safety semantics. |
+| `s` | **Sync global workflows** — runs the same `autosk workflow sync` path the CLI uses. A status-bar flash summarises the outcome (e.g. `1 added, 1 conflict, 1 skipped` or `no enabled global workflows`); per-workflow details (status, reason, error) are appended to the command log (`@`) so the operator can scroll back and inspect conflicts or skips that need action. |
 
-Isolated workflow rows render a muted `[wt]` marker after the
-workflow name; synthetic rows never carry it. After a successful
-`worktree → none` flip with leftover directories, the success
-acknowledgement plus a leftover-cleanup hint share one info-level
-flash (the leftover paths also land in the command log via `@`).
+Workflow rows render markers after the workflow name:
+- `[wt]` — isolated (non-synthetic, `worktree` isolation).
+- `[global]` — managed by the global workflow registry.
+- `[stale]` — local definition hash differs from the global registry.
+- `[rev:X]` — workflow revision (truncated to 12 characters).
+
+A stale global workflow shows **both** `[global]` and `[stale]`.
+After a successful `worktree → none` flip with leftover directories,
+the success acknowledgement plus a leftover-cleanup hint share one
+info-level flash (the leftover paths also land in the command log
+via `@`).
 
 ### Agents `[4]`
 

@@ -57,6 +57,7 @@ var _ datasource.Datasource = (*enrollFakeDS)(nil)
 // newPickerTestGui builds a headless Gui with sensible defaults for
 // the popup-flow tests: synchronous dispatcher (so OnPick paths land
 // without a real MainLoop) and a fresh state with one selected task.
+func (*enrollFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func newPickerTestGui(t *testing.T) (*Gui, *enrollFakeDS) {
 	t.Helper()
 	g, err := gocui.NewGui(gocui.NewGuiOpts{
