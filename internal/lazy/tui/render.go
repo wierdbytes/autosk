@@ -875,9 +875,31 @@ func renderTaskDetail(t datasource.Task, comments []datasource.Comment, signals 
 				srcW = w
 			}
 		}
+		// When the signal set spans more than one local day, every
+		// row must carry the full datetime so the operator can tell
+		// which day a transition belongs to. Otherwise keep the
+		// compact smart form (time-only for today).
+		signalFmt := timeformat.FormatDateTimeSmart
+		if len(signals) > 0 {
+			minDay := signals[0].CreatedAt.In(time.Local)
+			maxDay := minDay
+			for _, s := range signals[1:] {
+				lt := s.CreatedAt.In(time.Local)
+				if lt.Before(minDay) {
+					minDay = lt
+				}
+				if lt.After(maxDay) {
+					maxDay = lt
+				}
+			}
+			if minDay.Year() != maxDay.Year() || minDay.Month() != maxDay.Month() || minDay.Day() != maxDay.Day() {
+				signalFmt = timeformat.FormatDateTime
+			}
+		}
+
 		lines := make([]string, 0, len(signals))
 		for _, s := range signals {
-			stamp := fmt.Sprintf("%*s", dateW, timeformat.FormatDateTimeSmart(s.CreatedAt))
+			stamp := fmt.Sprintf("%*s", dateW, signalFmt(s.CreatedAt))
 			srcPad := strings.Repeat(" ", srcW-workflowStepPlainWidth(s.WorkflowName, s.StepName))
 			lines = append(lines, fmt.Sprintf("%s  %s%s  →  %s",
 				stamp,

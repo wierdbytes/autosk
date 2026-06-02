@@ -1189,3 +1189,27 @@ func TestRenderWorkflowDetail_NoTasksSubstrings(t *testing.T) {
 		})
 	}
 }
+
+// TestRenderTaskDetail_SignalsCrossDayUsesFullDate pins the fix for
+// the midnight-boundary bug: when a task's signal history spans more
+// than one local day, every row in the signals box must render the
+// full "YYYY-MM-DD HH:MM:SS" form so the operator can unambiguously
+// tell which day each transition belongs to.
+func TestRenderTaskDetail_SignalsCrossDayUsesFullDate(t *testing.T) {
+	now := time.Date(2026, 5, 21, 14, 0, 0, 0, time.Local)
+	yesterday := time.Date(2026, 5, 20, 23, 55, 0, 0, time.Local)
+	signals := []datasource.Signal{
+		{WorkflowName: "wf", StepName: "dev", Target: "review", CreatedAt: yesterday},
+		{WorkflowName: "wf", StepName: "review", Target: "done", CreatedAt: now},
+	}
+	task := datasource.Task{ID: "ask-cd01", Status: store.StatusWork, CreatedAt: yesterday}
+	out := renderTaskDetail(task, nil, signals, 80)
+	visible := ansiutil.Strip(out)
+
+	for _, ts := range []time.Time{yesterday, now} {
+		stamp := timeformat.FormatDateTime(ts)
+		if !strings.Contains(visible, stamp) {
+			t.Errorf("missing full datetime %q in output:\n%s", stamp, visible)
+		}
+	}
+}

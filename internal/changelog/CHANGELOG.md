@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
 
 ### Fixed
+- **lazy:** signals box now renders full `YYYY-MM-DD HH:MM:SS` for every row when the signal history spans multiple local days, fixing the midnight-boundary display bug where dates disappeared after the day rolled over.
+- **daemon:** when a task is cancelled while a job is still running, the agent finishes its current turn gracefully. Non-human transitions (`next_step`, `done`, `cancel`) are discarded so the task stays cancelled; `human` transitions are still honoured.
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
 
 ## [0.1.5] — 2026-05-25

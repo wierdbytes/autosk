@@ -1191,6 +1191,150 @@ func TestRun_RecordsLateArrivingSessionPath(t *testing.T) {
 	}
 }
 
+// TestRun_CancelledTask_BlocksNextStep verifies that when an operator
+// cancels a task while the job is still running, the agent's eventual
+// next_step signal is discarded and the task stays cancelled.
+func TestRun_CancelledTask_BlocksNextStep(t *testing.T) {
+	fx := newExecFixture(t)
+	defer fx.close()
+	ctx := context.Background()
+	taskID, jobID := fx.makeRun(t, "Cancelled mid-run", "dev")
+
+	stub := newStub()
+	stub.onPrompt = func(prompt string, attempt int) {
+		if attempt == 1 {
+			cancelStatus := store.StatusCancel
+			emptyStep := ""
+			if _, err := fx.ts.UpdateTask(ctx, taskID, store.TaskPatch{
+				Status:        &cancelStatus,
+				CurrentStepID: &emptyStep,
+			}); err != nil {
+				t.Errorf("operator UpdateTask: %v", err)
+			}
+			if _, err := fx.deps.Signals.Emit(ctx, taskID, "review"); err != nil {
+				t.Errorf("Emit: %v", err)
+			}
+		}
+	}
+	exec := executor.New(fx.deps, stubFactory(stub), fx.cfg)
+	if err := exec.Run(ctx, jobID); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	run, _ := fx.deps.Runs.GetRun(ctx, jobID)
+	if run.Status != runstore.StatusDone {
+		t.Fatalf("run.Status: %s (want done)", run.Status)
+	}
+	if run.TransitionID != nil {
+		t.Fatalf("transition_id should be nil for blocked transition, got %v", run.TransitionID)
+	}
+	tk, _ := fx.ts.GetTask(ctx, taskID)
+	if tk.Status != store.StatusCancel {
+		t.Fatalf("task.Status: %s (want cancel)", tk.Status)
+	}
+}
+
+// TestRun_CancelledTask_BlocksDone verifies that a done signal on a
+// cancelled task is discarded.
+func TestRun_CancelledTask_BlocksDone(t *testing.T) {
+	fx := newExecFixture(t)
+	defer fx.close()
+	ctx := context.Background()
+	syn, err := fx.deps.Workflows.EnsureSingle(ctx, "developer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepID := syn.Steps[0].ID
+	tk, err := fx.ts.CreateTask(ctx, store.Task{
+		Title:         "Cancel then done",
+		Status:        store.StatusWork,
+		Priority:      2,
+		WorkflowID:    syn.ID,
+		CurrentStepID: stepID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := fx.deps.Runs.CreateRun(ctx, runstore.NewRun{TaskID: tk.ID, StepID: stepID})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stub := newStub()
+	stub.onPrompt = func(prompt string, attempt int) {
+		if attempt == 1 {
+			cancelStatus := store.StatusCancel
+			emptyStep := ""
+			if _, err := fx.ts.UpdateTask(ctx, tk.ID, store.TaskPatch{
+				Status:        &cancelStatus,
+				CurrentStepID: &emptyStep,
+			}); err != nil {
+				t.Errorf("operator UpdateTask: %v", err)
+			}
+			if _, err := fx.deps.Signals.Emit(ctx, tk.ID, "done"); err != nil {
+				t.Errorf("Emit: %v", err)
+			}
+		}
+	}
+	exec := executor.New(fx.deps, stubFactory(stub), fx.cfg)
+	if err := exec.Run(ctx, run.JobID); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	runRow, _ := fx.deps.Runs.GetRun(ctx, run.JobID)
+	if runRow.Status != runstore.StatusDone {
+		t.Fatalf("run.Status: %s (want done)", runRow.Status)
+	}
+	if runRow.TransitionID != nil {
+		t.Fatalf("transition_id should be nil, got %v", runRow.TransitionID)
+	}
+	tkAfter, _ := fx.ts.GetTask(ctx, tk.ID)
+	if tkAfter.Status != store.StatusCancel {
+		t.Fatalf("task.Status: %s (want cancel)", tkAfter.Status)
+	}
+}
+
+// TestRun_CancelledTask_AllowsHuman verifies that a human signal on a
+// cancelled task is honoured (the task moves to human).
+func TestRun_CancelledTask_AllowsHuman(t *testing.T) {
+	fx := newExecFixture(t)
+	defer fx.close()
+	ctx := context.Background()
+	// Use the "validator" step because it admits a human transition
+	// in the fixture workflow.
+	taskID, jobID := fx.makeRun(t, "Cancel then human", "validator")
+
+	stub := newStub()
+	stub.onPrompt = func(prompt string, attempt int) {
+		if attempt == 1 {
+			cancelStatus := store.StatusCancel
+			emptyStep := ""
+			if _, err := fx.ts.UpdateTask(ctx, taskID, store.TaskPatch{
+				Status:        &cancelStatus,
+				CurrentStepID: &emptyStep,
+			}); err != nil {
+				t.Errorf("operator UpdateTask: %v", err)
+			}
+			if _, err := fx.deps.Signals.Emit(ctx, taskID, "human"); err != nil {
+				t.Errorf("Emit: %v", err)
+			}
+		}
+	}
+	exec := executor.New(fx.deps, stubFactory(stub), fx.cfg)
+	if err := exec.Run(ctx, jobID); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	run, _ := fx.deps.Runs.GetRun(ctx, jobID)
+	if run.Status != runstore.StatusDone {
+		t.Fatalf("run.Status: %s (want done)", run.Status)
+	}
+	if run.TransitionID == nil || *run.TransitionID == 0 {
+		t.Fatalf("transition_id should be recorded, got %v", run.TransitionID)
+	}
+	tk, _ := fx.ts.GetTask(ctx, taskID)
+	if tk.Status != store.StatusHuman {
+		t.Fatalf("task.Status: %s (want human)", tk.Status)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && haystack != "" && needle != "" && (haystack == needle || indexOf(haystack, needle) >= 0)
 }

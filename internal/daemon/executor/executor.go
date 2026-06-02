@@ -490,6 +490,20 @@ func (e *Executor) Run(ctx context.Context, jobID string) error {
 		return e.failTerminal(bg, jobID, &exit, fmt.Errorf("pi exit: %w", werr))
 	}
 
+	// 7.5 Honour operator-initiated task cancellation: if the task
+	// was cancelled while the agent was still running, let the job
+	// finish gracefully but discard any transition other than human.
+	tk, gerr := e.deps.Tasks.GetTask(bg, run.TaskID)
+	if gerr == nil && tk.Status == store.StatusCancel {
+		if signaled.TaskStatus != "human" {
+			if _, err := e.deps.Runs.MarkDone(bg, jobID, exit, nil); err != nil {
+				return fmt.Errorf("mark done after task cancel: %w", err)
+			}
+			return nil
+		}
+		// signaled.TaskStatus == "human" falls through to advanceTask.
+	}
+
 	// 8. Advance the task atomically + persist transition_id.
 	if err := e.advanceTask(bg, run.TaskID, signaled); err != nil {
 		// MaxVisitsExceededError already carries the documented
