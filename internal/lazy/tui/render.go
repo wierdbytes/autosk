@@ -563,12 +563,26 @@ func renderWorkflowsPanel(wfs []datasource.Workflow, _ int, filter string) (stri
 	}
 	for _, w := range wfs {
 		name := styleWorkflowName.Render(fmt.Sprintf("%-24s", w.Name))
-		// Marker column is fixed-width so the `N steps` column lines
-		// up across rows regardless of the isolation mode. 4 cells =
-		// space + "[wt]".
-		marker := "    "
+		var markers []string
 		if !w.IsSynthetic && w.Isolation == "worktree" {
-			marker = styleMuted.Render("[wt]")
+			markers = append(markers, "[wt]")
+		}
+		if w.SourceType == "global" {
+			markers = append(markers, "[global]")
+			if w.IsStale {
+				markers = append(markers, "[stale]")
+			}
+		}
+		if w.Revision != "" {
+			rev := w.Revision
+			if len(rev) > 12 {
+				rev = rev[:12]
+			}
+			markers = append(markers, "[rev:"+rev+"]")
+		}
+		marker := ""
+		if len(markers) > 0 {
+			marker = styleMuted.Render(strings.Join(markers, " "))
 		}
 		steps := styleMuted.Render(fmt.Sprintf("%d steps", len(w.Steps)))
 		first := styleMuted.Render("first=") + renderStepName(w.FirstStep)
@@ -576,7 +590,11 @@ func renderWorkflowsPanel(wfs []datasource.Workflow, _ int, filter string) (stri
 		if w.IsSynthetic {
 			synth = " " + styleMuted.Render("(synthetic)")
 		}
-		fmt.Fprintf(&b, "%s %s %s  %s%s\n", name, marker, steps, first, synth)
+		if marker != "" {
+			fmt.Fprintf(&b, "%s %s %s  %s%s\n", name, marker, steps, first, synth)
+		} else {
+			fmt.Fprintf(&b, "%s %s  %s%s\n", name, steps, first, synth)
+		}
 	}
 	return b.String(), header
 }
@@ -1211,13 +1229,26 @@ func styleForJobStatus(j datasource.Job) lipgloss.Style {
 func renderWorkflowDetail(w datasource.Workflow, width int) string {
 	var b strings.Builder
 
-	// Header line: <name> [wt]? first step: <step>. No leading
-	// "workflow" chip — the gocui frame title ("[3] Detail") already
+	// Header line: <name> [wt]? [global|stale]? [rev:X]? first step: <step>.
+	// No leading "workflow" chip — the gocui frame title ("[3] Detail") already
 	// identifies the pane, and the row reads as a single scan line
 	// keyed on the workflow name in its entity hue.
 	hdr := renderWorkflowName(w.Name)
 	if !w.IsSynthetic && w.Isolation == "worktree" {
 		hdr += " " + styleMuted.Render("[wt]")
+	}
+	if w.SourceType == "global" {
+		hdr += " " + styleMuted.Render("[global]")
+		if w.IsStale {
+			hdr += " " + styleWarn.Render("[stale]")
+		}
+	}
+	if w.Revision != "" {
+		rev := w.Revision
+		if len(rev) > 12 {
+			rev = rev[:12]
+		}
+		hdr += " " + styleMuted.Render("[rev:"+rev+"]")
 	}
 	hdr += " " + styleMuted.Render("first step:") + " " + renderStepName(w.FirstStep)
 	b.WriteString(hdr + "\n")
@@ -1229,6 +1260,21 @@ func renderWorkflowDetail(w datasource.Workflow, width int) string {
 		// the visual language of the task pane.
 		b.WriteString(markdown.Render(w.Description, width))
 		b.WriteString("\n")
+	}
+
+	// Origin section for managed workflows.
+	if w.SourceType != "" {
+		b.WriteString(styleMuted.Render("source: " + w.SourceType))
+		if w.Source != "" {
+			b.WriteString(styleMuted.Render(" (" + w.Source + ")"))
+		}
+		b.WriteString("\n")
+		if w.Revision != "" {
+			b.WriteString(styleMuted.Render("revision: "+w.Revision) + "\n")
+		}
+		if w.DefinitionHash != "" {
+			b.WriteString(styleMuted.Render("hash: "+w.DefinitionHash) + "\n")
+		}
 	}
 
 	// Compute column widths from the plain (un-styled) token widths so
@@ -1435,7 +1481,7 @@ func renderOptionsStrip(specs []bindingSpec, focusedWin string, innerWidth int) 
 
 	sep := styleMuted.Render(" | ")
 	ellipsis := styleMuted.Render("…")
-	sepVisible := lipgloss.Width(" | ")     // 3
+	sepVisible := lipgloss.Width(" | ")    // 3
 	ellipsisVisible := lipgloss.Width("…") // 1
 
 	// Compose left-to-right, truncating with "…" once we'd exceed

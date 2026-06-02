@@ -31,7 +31,7 @@ var ErrSyncFailed = errors.New("global workflow sync failed")
 
 // InstallAgentsFunc installs any missing agents referenced by def and returns
 // the package registry entries installed by this sync run.
-type InstallAgentsFunc func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error)
+type InstallAgentsFunc func(ctx context.Context, def workflow.Definition, entry Entry) ([]pkgregistry.Entry, error)
 
 // SyncOptions controls project materialization of enabled global workflows.
 type SyncOptions struct {
@@ -149,7 +149,7 @@ func syncAdd(ctx context.Context, wf *workflow.Store, opts SyncOptions, item Syn
 		item.Error = fmt.Sprintf("validate workflow: %v", err)
 		return item
 	}
-	installed, err := installAgents(ctx, opts, def)
+	installed, err := installAgents(ctx, opts, def, entry)
 	item.AutoInstalledAgents = installed
 	if err != nil {
 		item.Status = SyncError
@@ -226,7 +226,7 @@ func syncExisting(ctx context.Context, wf *workflow.Store, opts SyncOptions, ite
 		item.Error = fmt.Sprintf("validate workflow: %v", err)
 		return item
 	}
-	installed, err := installAgents(ctx, opts, def)
+	installed, err := installAgents(ctx, opts, def, entry)
 	item.AutoInstalledAgents = installed
 	if err != nil {
 		item.Status = SyncError
@@ -246,11 +246,11 @@ func syncExisting(ctx context.Context, wf *workflow.Store, opts SyncOptions, ite
 	return item
 }
 
-func installAgents(ctx context.Context, opts SyncOptions, def workflow.Definition) ([]pkgregistry.Entry, error) {
+func installAgents(ctx context.Context, opts SyncOptions, def workflow.Definition, entry Entry) ([]pkgregistry.Entry, error) {
 	if opts.InstallAgents == nil {
 		return nil, nil
 	}
-	installed, err := opts.InstallAgents(ctx, def)
+	installed, err := opts.InstallAgents(ctx, def, entry)
 	if err != nil {
 		return installed, err
 	}

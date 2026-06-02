@@ -30,6 +30,7 @@ func (f *fakeEditDS) UpdateTitleDescription(_ context.Context, id, title, desc s
 // pass after that point seeds the TextArea from those initial
 // values — covered by the popup_compose_test.go layout test, so
 // here we pin the state shape instead.
+func (*fakeEditDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestTaskEditOpensComposePrefilled(t *testing.T) {
 	gu := &Gui{st: newState()}
 	gu.st.tasks = []datasource.Task{{

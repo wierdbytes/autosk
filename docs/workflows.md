@@ -200,6 +200,68 @@ agent rows were changed. `--force` only replaces workflows already
 managed by the matching active global origin; local same-name conflicts
 and workflows currently in use are reported instead of overwritten.
 
+#### Global workflow registry CLI
+
+The `autosk workflow global` command tree manages the global workflow registry outside any single project.
+
+**File-backed workflows:**
+
+```bash
+autosk workflow global add my-flow.json
+autosk workflow global list [--all]
+autosk workflow global show my-flow
+autosk workflow global remove my-flow [--force]
+autosk workflow global enable my-flow
+autosk workflow global disable my-flow
+autosk workflow global sync [--force] [--dry-run]
+autosk workflow global adopt my-flow [--dry-run]
+```
+
+**Package-backed workflows:**
+
+```bash
+autosk workflow global install @your-org/workflows [--workflow NAME] [--version VER] [--no-install] [--dry-run]
+autosk workflow global update my-flow [--version VER] [--no-install] [--dry-run] [--force]
+```
+
+**Common flags:**
+
+| Flag | Applies to | Meaning |
+|---|---|---|
+| `--workflow` | `install` | Select one workflow when the package declares multiple. |
+| `--version` | `install`, `update` | Target npm version spec (default: latest). Cannot be combined with `--no-install`. |
+| `--no-install` | `install`, `update` | Use the already-installed package only; do not shell npm. |
+| `--dry-run` | `add`, `adopt`, `install`, `update`, `sync` | Preview without writing the registry or installing packages. |
+| `--force` | `remove`, `update`, `sync` | Remove an enabled workflow, update even when the hash matches, or replace changed global-managed workflows. |
+| `--json` | all | Emit structured JSON to stdout instead of human text. |
+| `--quiet` | all | Suppress all non-error output. |
+
+**Dry-run and JSON behaviour**
+
+Every `--dry-run` path emits a structured preview and performs no mutations:
+- It does not create `$AUTOSK_WORKFLOWS` or `$AUTOSK_PACKAGES` directories.
+- It does not shell npm or modify `registry.json`.
+- For remote packages that are already installed, `--dry-run` without `--version` returns a note instead of hashing potentially stale files.
+- For remote packages with an explicit `--version` that differs from the installed copy, `--dry-run` returns a note instead of installing the requested version.
+
+When `--dry-run --json` is used together, the output is a JSON object with at least `dry_run: true`, `action`, `name` or `package_name`, and `would_mutate`. The `would_mutate` field indicates whether the equivalent non-dry-run command would change state (`true` when it would, `false` for a no-op).
+
+**Examples:**
+
+```bash
+# Register a local workflow JSON in the global registry
+autosk workflow global add ./my-workflow.json
+
+# Install a packaged workflow globally
+autosk workflow global install @autosk/workflows --workflow bug-fix --json
+
+# Preview an update without changing anything
+autosk workflow global update bug-fix --dry-run
+
+# Materialize all enabled globals into the current project
+autosk workflow global sync --force --dry-run --json
+```
+
 #### Managed revisions
 
 Managed workflows are workflows with active provenance that autosk owns,
@@ -276,15 +338,25 @@ want the shipped default back, `autosk workflow delete
 feature-dev-generic` followed by `autosk init` re-creates it with the
 current embedded definition.
 
-If you want a truly empty database, pass `--skip-bootstrap`:
+`autosk init` also syncs enabled global workflows after bootstrap (see
+[`autosk workflow sync`](#sync-global-workflows-into-a-project)).
+Pass `--skip-global-workflows` to opt out of that step.
+
+If you want a minimal database with no workflows seeded, pass both
+flags:
 
 ```bash
-autosk init --skip-bootstrap     # no workflow seeded, no agent installed
+autosk init --skip-bootstrap --skip-global-workflows   # no workflows, no agents
 ```
 
-Bootstrap failures (network down, npm registry 5xx, read-only packages
-prefix, ...) are non-fatal: `autosk init` warns on stderr, exits 0, and
-leaves a valid migrated DB behind.
+Using `--skip-bootstrap` alone skips only the built-in seed; enabled
+global workflows are still materialized unless `--skip-global-workflows`
+is also set.
+
+Bootstrap and global-workflow-sync failures (network down, npm registry
+5xx, read-only packages prefix, missing agent, ...) are non-fatal:
+`autosk init` warns on stderr, exits 0, and leaves a valid migrated DB
+behind.
 
 ##### Implicit auto-init from other verbs
 
@@ -304,9 +376,10 @@ whether stdin/stderr are attached to a real terminal:
   Empty answer or `y`/`yes` accepts. `n`/`no` aborts the verb with an
   error pointing at `autosk init`, `--db`, and `AUTOSK_DB`. After an
   accepted prompt the bootstrap sequence is identical to
-  `autosk init`: migrations, then the same managed bootstrap decision
-  for `feature-dev-generic` (including installing `@autogent/generic`
-  only when a create or revision sync is needed).
+  `autosk init`: migrations, then the managed bootstrap decision for
+  `feature-dev-generic` (including installing `@autogent/generic` only
+  when a create or revision sync is needed), then syncing enabled global
+  workflows into the project.
 
 - **Non-interactive (no TTY, piped stdin, `--json`, `--quiet`).** The
   prompt is skipped and the CLI behaves as if the user answered `y`.
@@ -314,14 +387,15 @@ whether stdin/stderr are attached to a real terminal:
   scripts, CI, the daemon executor, and editor terminals that
   intentionally hide the TTY.
 
-Two environment knobs control the implicit path without authoring a
+Four environment knobs control the implicit path without authoring a
 workflow JSON yourself:
 
 | Variable | Effect |
 | -------- | ------ |
 | `AUTOSK_NO_AUTOINIT=1` | Refuse auto-init entirely; the verb errors out with `auto-init disabled by AUTOSK_NO_AUTOINIT`. Intended for tests and read-only environments. |
 | `AUTOSK_AUTOINIT_ASSUME_YES=1` | Skip the interactive prompt even under a TTY and proceed as if the user said `y`. |
-| `AUTOSK_AUTOINIT_SKIP_BOOTSTRAP=1` | Create `.autosk/db` (with the y/n prompt path unchanged) but skip the workflow-seed step. Does not affect explicit `autosk init` — use its `--skip-bootstrap` flag for that. |
+| `AUTOSK_AUTOINIT_SKIP_BOOTSTRAP=1` | Create `.autosk/db` (with the y/n prompt path unchanged) but skip the built-in workflow-seed step. Does not affect explicit `autosk init` — use its `--skip-bootstrap` flag for that. |
+| `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS=1` | Skip syncing enabled global workflows during auto-init. Does not affect explicit `autosk init` — use its `--skip-global-workflows` flag for that. |
 
 The shipped example:
 

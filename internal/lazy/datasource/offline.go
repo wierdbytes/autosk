@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"autosk/internal/daemon/api"
 	"autosk/internal/daemon/runstore"
 	"autosk/internal/daemon/transcript"
+	"autosk/internal/globalworkflow"
 	"autosk/internal/store"
 	"autosk/internal/store/doltlite"
 	"autosk/internal/tasksvc"
@@ -329,24 +331,40 @@ func wfName(ctx context.Context, db *sql.DB, wfID string) string {
 }
 
 // Workflows lists workflows + their steps + their per-step task counts.
+// Global-managed workflows carry SourceType/Source/DefinitionHash/Revision
+// and IsStale is computed against the on-disk global registry.
 func (o *Offline) Workflows(ctx context.Context, includeSynthetic bool) ([]Workflow, error) {
 	ws := workflow.New(o.s.DB(), agent.New(o.s.DB()))
 	list, err := ws.List(ctx, includeSynthetic)
 	if err != nil {
 		return nil, fmt.Errorf("list workflows: %w", err)
 	}
+
+	// Load the global registry once so we can check staleness for
+	// every managed workflow without re-opening registry.json N times.
+	var globalMap map[string]globalworkflow.Entry
+	if reg, rerr := globalworkflow.Default(); rerr == nil {
+		if entries, lerr := reg.List(true); lerr == nil {
+			globalMap = make(map[string]globalworkflow.Entry, len(entries))
+			for _, e := range entries {
+				globalMap[e.Name] = e
+			}
+		}
+	}
+
 	out := make([]Workflow, 0, len(list))
 	for _, w := range list {
 		full, err := ws.GetByID(ctx, w.ID)
 		if err != nil {
 			continue
 		}
-		out = append(out, projectWorkflow(ctx, o.s.DB(), full))
+		origin, _ := ws.GetOrigin(ctx, w.ID)
+		out = append(out, projectWorkflow(ctx, o.s.DB(), full, origin, globalMap))
 	}
 	return out, nil
 }
 
-func projectWorkflow(ctx context.Context, db *sql.DB, w workflow.Workflow) Workflow {
+func projectWorkflow(ctx context.Context, db *sql.DB, w workflow.Workflow, origin workflow.Origin, globalMap map[string]globalworkflow.Entry) Workflow {
 	iso := string(w.Isolation.Normalize())
 	out := Workflow{
 		ID: w.ID, Name: w.Name, Description: w.Description, IsSynthetic: w.IsSynthetic,
@@ -385,6 +403,21 @@ func projectWorkflow(ctx context.Context, db *sql.DB, w workflow.Workflow) Workf
 	// refresh tick. Mirrors workflow.Store.UpdateIsolation's guard so
 	// the lazy popup and the CLI agree on what "non-terminal" means.
 	loadNonTerminalSample(ctx, db, w.ID, stepNames, &out)
+
+	// Origin + staleness.
+	out.SourceType = origin.SourceType
+	out.Source = origin.Source
+	out.DefinitionHash = origin.DefinitionHash
+	out.Revision = origin.Revision
+	if origin.SourceType == "global" && globalMap != nil {
+		if entry, ok := globalMap[origin.Source]; ok {
+			out.IsStale = origin.DefinitionHash != entry.DefinitionHash
+		} else if origin.Source != "" {
+			// Global origin but no longer in registry -
+			// treat as stale so the operator notices.
+			out.IsStale = true
+		}
+	}
 	return out
 }
 
@@ -977,6 +1010,186 @@ func (o *Offline) UpdateWorkflowIsolation(ctx context.Context, name, mode string
 		_ = o.s.DoltCommit(ctx, fmt.Sprintf("lazy: workflow update %s isolation=%s→%s", name, rep.From, rep.To))
 	}
 	return out, nil
+}
+
+// SyncWorkflows materializes enabled global workflows into the project
+// DB using the same path as `autosk workflow sync`. Conflicts and
+// per-workflow outcomes are returned in the report; the caller (lazy
+// TUI) surfaces them via flash + command log.
+func (o *Offline) SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncReport, error) {
+	reg, err := globalworkflow.Default()
+	if err != nil {
+		return SyncReport{}, err
+	}
+	ws := workflow.New(o.s.DB(), agent.New(o.s.DB()))
+	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, reg, ws, globalworkflow.SyncOptions{
+		DryRun: dryRun,
+		Force:  force,
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
+			versions := map[string]string{}
+			if entry.SourceType == "package" && entry.Source != "" {
+				if v, ok := entry.SourceMetadata["version"].(string); ok && v != "" {
+					versions[entry.Source] = v
+				}
+			}
+			return autoInstallMissingAgents(ctx, def, ws.Agents(), o.s, o.registry, versions)
+		},
+	})
+	if !dryRun && rep.Mutated() {
+		_ = o.s.DoltCommit(ctx, "lazy: workflow sync global")
+	}
+	return toDatasourceSyncReport(rep), err
+}
+
+// autoInstallMissingAgents mirrors the CLI's auto-install logic so
+// the TUI sync path behaves identically. The pkgregistry.Registry
+// argument is optional (may be nil in tests); when nil scoped agents
+// are skipped (they'll produce validation errors later).
+func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, reg *pkgregistry.Registry, versions map[string]string) ([]pkgregistry.Entry, error) {
+	if reg == nil {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(def.Steps))
+	for _, s := range def.Steps {
+		name := strings.TrimSpace(s.AgentName)
+		if name == "" || name == agent.HumanAgentName || !looksLikeScopedNpmName(name) {
+			continue
+		}
+		seen[name] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	var todo []string
+	for name := range seen {
+		if _, err := ag.GetByName(ctx, name); err == nil {
+			continue
+		} else if !errors.Is(err, agent.ErrNotFound) {
+			return nil, fmt.Errorf("check agent %s: %w", name, err)
+		}
+		todo = append(todo, name)
+	}
+	if len(todo) == 0 {
+		return nil, nil
+	}
+	if err := reg.EnsurePrefix(); err != nil {
+		return nil, fmt.Errorf("ensure packages prefix: %w", err)
+	}
+	agWithResolver := agent.New(dl.DB()).WithResolver(reg)
+	installed := make([]pkgregistry.Entry, 0, len(todo))
+	for _, name := range todo {
+		var entry pkgregistry.Entry
+		_, stderr, err := withStdioSilenced(func() error {
+			var ierr error
+			ver := ""
+			if versions != nil {
+				ver = versions[name]
+			}
+			entry, ierr = reg.Install(ctx, name, ver)
+			return ierr
+		})
+		if err != nil {
+			msg := fmt.Sprintf("auto-install %s failed: %v (install manually with `autosk agent install %s`)", name, err, name)
+			if stderr != "" {
+				msg = fmt.Sprintf("auto-install %s failed: %v (stderr: %s) (install manually with `autosk agent install %s`)", name, err, strings.TrimSpace(stderr), name)
+			}
+			return installed, errors.New(msg)
+		}
+		if cfg, rerr := reg.Resolve(entry.Name); rerr == nil && cfg.Runner != "" {
+			_, stderr, err := withStdioSilenced(func() error {
+				return reg.EnsureRuntime(ctx, "")
+			})
+			if err != nil {
+				msg := fmt.Sprintf("install runtime for custom-runner agent %s: %v", entry.Name, err)
+				if stderr != "" {
+					msg = fmt.Sprintf("install runtime for custom-runner agent %s: %v (stderr: %s)", entry.Name, err, strings.TrimSpace(stderr))
+				}
+				return installed, errors.New(msg)
+			}
+		}
+		if _, eerr := agWithResolver.EnsureByName(ctx, entry.Name); eerr != nil {
+			return installed, fmt.Errorf("register %s in agents table: %w", entry.Name, eerr)
+		}
+		installed = append(installed, entry)
+	}
+	return installed, nil
+}
+
+// withStdioSilenced redirects stdout and stderr during fn so that
+// subprocess output does not corrupt the gocui TUI screen. It returns
+// the captured stdout, stderr, and any error from fn. If fn fails,
+// callers should include captured stderr in the returned error so
+// diagnostics are not lost.
+func withStdioSilenced(fn func() error) (string, string, error) {
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return "", "", err
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		return "", "", err
+	}
+
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout = outW
+	os.Stderr = errW
+
+	// Drain pipes concurrently so fn() cannot deadlock on a full
+	// pipe buffer (typically 64 KiB).
+	outDone := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(outR)
+		outDone <- string(b)
+	}()
+	errDone := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(errR)
+		errDone <- string(b)
+	}()
+
+	fnErr := fn()
+
+	os.Stdout, os.Stderr = origOut, origErr
+	_ = outW.Close()
+	_ = errW.Close()
+
+	return <-outDone, <-errDone, fnErr
+}
+
+func looksLikeScopedNpmName(s string) bool {
+	if len(s) < 3 || s[0] != '@' {
+		return false
+	}
+	slash := strings.IndexByte(s, '/')
+	return slash > 1 && slash < len(s)-1
+}
+
+// toDatasourceSyncReport maps the globalworkflow package report to
+// the datasource-package mirror.
+func toDatasourceSyncReport(r globalworkflow.SyncReport) SyncReport {
+	out := SyncReport{
+		Prefix: r.Prefix,
+		DryRun: r.DryRun,
+		Force:  r.Force,
+	}
+	for _, item := range r.Workflows {
+		wj := SyncWorkflowReport{
+			Name:           item.Name,
+			Status:         string(item.Status),
+			WorkflowID:     item.WorkflowID,
+			DefinitionHash: item.DefinitionHash,
+			PreviousHash:   item.PreviousHash,
+			Revision:       item.Revision,
+			Reason:         item.Reason,
+			Error:          item.Error,
+			Mutated:        item.Mutated,
+		}
+		for _, e := range item.AutoInstalledAgents {
+			wj.AutoInstalledAgents = append(wj.AutoInstalledAgents, e.Name+"@"+e.Version)
+		}
+		out.Workflows = append(out.Workflows, wj)
+	}
+	return out
 }
 
 // toDatasourceUpdateIsolationReport maps the workflow-package report

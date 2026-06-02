@@ -85,7 +85,7 @@ func TestSyncGlobalWorkflows_DryRunDoesNotInstallOrCreate(t *testing.T) {
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
 		DryRun: true,
-		InstallAgents: func(context.Context, workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(context.Context, workflow.Definition, globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			return nil, nil
 		},
@@ -120,7 +120,7 @@ func TestSyncGlobalWorkflows_DryRunReportsInvalidAdd(t *testing.T) {
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
 		DryRun: true,
-		InstallAgents: func(context.Context, workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(context.Context, workflow.Definition, globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			return nil, nil
 		},
@@ -218,7 +218,7 @@ func TestSyncGlobalWorkflows_ForceInUsePreflightPreventsAgentInstall(t *testing.
 	installCalled := false
 	rep, err = globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
 		Force: true,
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			if _, err := ag.Create(ctx, "@autosk/new-scoped", false); err != nil {
 				return nil, err
@@ -260,7 +260,7 @@ func TestSyncGlobalWorkflows_InvalidDefinitionPreventsAgentInstall(t *testing.T)
 	installCalled := false
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			if _, err := ag.Create(ctx, "@autosk/invalid-scoped", false); err != nil {
 				return nil, err
@@ -297,7 +297,7 @@ func TestSyncGlobalWorkflows_MissingBareAgentPreflightPreventsScopedInstallOnAdd
 	installCalled := false
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			if _, err := ag.Create(ctx, "@autosk/missing-scoped", false); err != nil {
 				return nil, err
@@ -345,7 +345,7 @@ func TestSyncGlobalWorkflows_MissingBareAgentPreflightPreventsScopedInstallOnFor
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
 		Force: true,
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			installCalled = true
 			if _, err := ag.Create(ctx, "@autosk/missing-scoped", false); err != nil {
 				return nil, err
@@ -572,7 +572,7 @@ func TestSyncGlobalWorkflows_PartialAgentInstallErrorIsReportedAsMutation(t *tes
 	defer done()
 
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, r, wf, globalworkflow.SyncOptions{
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 			if _, err := ag.Create(ctx, "@autosk/partial", false); err != nil {
 				return nil, err
 			}
@@ -653,7 +653,7 @@ func mixedAgentDefinition(name, description string) workflow.Definition {
 
 func ensureSyncAgents(t *testing.T, ag *agent.Store, calls *int) globalworkflow.InstallAgentsFunc {
 	t.Helper()
-	return func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
+	return func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
 		(*calls)++
 		installed := make([]pkgregistry.Entry, 0, len(def.Steps))
 		for _, step := range def.Steps {

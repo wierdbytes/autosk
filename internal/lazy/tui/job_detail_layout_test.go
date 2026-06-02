@@ -580,6 +580,7 @@ func (f *dispatchFakeDS) AbortJob(_ context.Context, jobID string) error {
 //  3. Operator presses Ctrl-D (liveSend / liveDispatch).
 //  4. SendInput must be called with jobID == "job-A" (the
 //     authored target, recorded in jobInputOwner).
+func (*dispatchFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestLiveDispatch_AfterReshuffle_DispatchesToOwner(t *testing.T) {
 	gu := jobDetailLayoutFixture(t)
 	ds := &dispatchFakeDS{}
@@ -1085,6 +1086,7 @@ func (f *archiveFakeDS) Messages(_ context.Context, jobID string, _ bool, _ int)
 //     (scheduleJobArchive dispatches loadJobArchive on a worker; we
 //     poll because OnWorker is async). Before the fix the call
 //     never happened until a cursor move.
+func (*archiveFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestSettleOnPanelJobs_FocusChangeHydratesDetail(t *testing.T) {
 	cases := []struct {
 		name string

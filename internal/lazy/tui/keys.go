@@ -188,6 +188,7 @@ func (gu *Gui) bindingSpecs() []bindingSpec {
 		{View: winWorkflows, Key: 'n', Mod: gocui.ModNone, Handler: gu.workflowNew, Description: "new workflow (from file)", Short: "new", DisplayOnScreen: true},
 		{View: winWorkflows, Key: 'D', Mod: gocui.ModNone, Handler: gu.workflowDelete, Description: "delete workflow", Short: "delete", DisplayOnScreen: true},
 		{View: winWorkflows, Key: 'i', Mod: gocui.ModNone, Handler: gu.workflowIsolation, Description: "toggle isolation", Short: "iso", DisplayOnScreen: true},
+		{View: winWorkflows, Key: 's', Mod: gocui.ModNone, Handler: gu.workflowSync, Description: "sync global workflows", Short: "sync", DisplayOnScreen: true},
 
 		// Agents "write" verbs are intentionally informational only:
 		// the daemon has no /v1/agents endpoint in v1, so both keys
@@ -921,10 +922,10 @@ func (gu *Gui) dispatchPaletteCommand(cmd string) {
 // Bucketing rules (lazygit's uniqueBindings parity):
 //
 //   - Local      = entries whose View == focused panel's window AND
-//                  Tag != "navigation".
+//     Tag != "navigation".
 //   - Global     = entries with Tag == "global" (or View == "").
 //   - Navigation = entries whose View == focused panel's window AND
-//                  Tag == "navigation".
+//     Tag == "navigation".
 //
 // Dedup is by Description within bucket (keep first occurrence) so
 // equivalent aliases (j vs ArrowDown, q vs Ctrl-C) only surface
@@ -1695,6 +1696,64 @@ func (gu *Gui) workflowIsolation(*gocui.Gui, *gocui.View) error {
 			return nil
 		})
 		return nil
+	})
+	return nil
+}
+
+// workflowSync is the `s` handler on the Workflows panel. It runs
+// `autosk workflow sync` through the datasource so the TUI and CLI
+// share one code path. The report is surfaced via flash + command
+// log so the operator sees conflicts and per-workflow outcomes
+// without leaving the dashboard.
+func (gu *Gui) workflowSync(*gocui.Gui, *gocui.View) error {
+	gu.runDispatch(func() {
+		rep, err := gu.ds.SyncWorkflows(gu.ctx, false, false)
+		counts := map[string]int{}
+		for _, w := range rep.Workflows {
+			counts[w.Status]++
+		}
+		var summary string
+		if len(rep.Workflows) == 0 {
+			summary = "no enabled global workflows"
+		} else {
+			var parts []string
+			for _, status := range []string{"added", "updated", "noop", "skipped", "conflict", "error"} {
+				if n := counts[status]; n > 0 {
+					parts = append(parts, fmt.Sprintf("%d %s", n, status))
+				}
+			}
+			summary = strings.Join(parts, ", ")
+		}
+		if err != nil {
+			if len(rep.Workflows) > 0 {
+				gu.flashf("err", "workflow sync failed: %s", summary)
+			} else {
+				gu.flashf("err", "workflow sync failed: %v", err)
+			}
+		} else {
+			gu.flashf("info", "workflow sync: %s", summary)
+		}
+		// Append per-workflow details to the command log regardless
+		// of top-level success/failure so the operator can scroll
+		// back and see every outcome.
+		for _, w := range rep.Workflows {
+			line := fmt.Sprintf("sync %s: %s", w.Name, w.Status)
+			if w.Reason != "" {
+				line += " (" + w.Reason + ")"
+			}
+			if w.Error != "" {
+				line += ": " + w.Error
+			}
+			gu.st.withLock(func() {
+				gu.st.appendLog(line)
+			})
+			if len(w.AutoInstalledAgents) > 0 {
+				gu.st.withLock(func() {
+					gu.st.appendLog("  auto_agents: " + strings.Join(w.AutoInstalledAgents, ", "))
+				})
+			}
+		}
+		gu.refreshAll()
 	})
 	return nil
 }

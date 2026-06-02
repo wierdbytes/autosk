@@ -24,6 +24,14 @@ import (
 // file.
 const EnvAutoInitSkipBootstrap = "AUTOSK_AUTOINIT_SKIP_BOOTSTRAP"
 
+// EnvAutoInitSkipGlobalWorkflows, when set to a non-empty value,
+// suppresses the global workflow sync step that openStore would
+// otherwise run after auto-creating .autosk/db.
+//
+// Explicit `autosk init` is NOT affected by this env — it has its own
+// --skip-global-workflows flag.
+const EnvAutoInitSkipGlobalWorkflows = "AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS"
+
 // EnvAutoInitAssumeYes, when set to a non-empty value, suppresses the
 // interactive y/n prompt and proceeds as if the user answered "y".
 // Intended for automation that happens to run with a TTY attached

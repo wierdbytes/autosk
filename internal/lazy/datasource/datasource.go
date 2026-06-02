@@ -115,6 +115,15 @@ type Workflow struct {
 	// `... and N more` suffix). The full list is always available
 	// via `autosk list --workflow <name>`.
 	NonTerminalTasks []NonTerminalTaskRef
+	// Origin fields surface provenance for managed workflows.
+	// SourceType is "" for unmanaged (operator-created) workflows.
+	SourceType     string
+	Source         string
+	DefinitionHash string
+	Revision       string
+	// IsStale is true when the workflow is globally managed and the
+	// local definition hash no longer matches the global registry.
+	IsStale bool
 }
 
 // NonTerminalTaskSampleSize bounds Workflow.NonTerminalTasks (the
@@ -272,6 +281,42 @@ type LeftoverWorktree struct {
 	Path   string
 }
 
+// SyncReport is the lazy-side mirror of globalworkflow.SyncReport.
+type SyncReport struct {
+	Prefix    string
+	DryRun    bool
+	Force     bool
+	Workflows []SyncWorkflowReport
+}
+
+// Mutated reports whether this non-dry-run sync changed the project DB.
+func (r SyncReport) Mutated() bool {
+	if r.DryRun {
+		return false
+	}
+	for _, wf := range r.Workflows {
+		if wf.Mutated {
+			return true
+		}
+	}
+	return false
+}
+
+// SyncWorkflowReport is the lazy-side mirror of
+// globalworkflow.SyncWorkflowReport.
+type SyncWorkflowReport struct {
+	Name                string
+	Status              string
+	WorkflowID          string
+	DefinitionHash      string
+	PreviousHash        string
+	Revision            string
+	Reason              string
+	Error               string
+	AutoInstalledAgents []string // "name@version" strings for display
+	Mutated             bool
+}
+
 // Datasource is the read+write contract the TUI talks through.
 type Datasource interface {
 	// ---- reads (return promptly; safe to call from g.OnWorker) ----
@@ -331,6 +376,12 @@ type Datasource interface {
 	// exposed at the datasource layer: the TUI's confirmation popup
 	// is the preview; the call always commits.
 	UpdateWorkflowIsolation(ctx context.Context, name, mode string, force bool) (UpdateIsolationReport, error)
+	// SyncWorkflows materializes enabled global workflows into the
+	// project DB. It uses the same code path as `autosk workflow sync`
+	// (globalworkflow.SyncGlobalWorkflows) so the TUI and CLI agree
+	// on every outcome. force=true replaces changed global-managed
+	// workflows; dryRun previews without writing.
+	SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncReport, error)
 	InstallAgent(ctx context.Context, name, version string) error
 	UninstallAgent(ctx context.Context, name string) error
 

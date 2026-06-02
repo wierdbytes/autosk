@@ -132,6 +132,7 @@ func (f *refreshFakeDS) StreamLive(_ context.Context, _ string) (*datasource.Liv
 // We drive fetchRefresh + applyRefreshLocked directly (no gocui
 // needed) and exercise both branches: success populates the cache,
 // error preserves the prior cache entry.
+func (*refreshFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestRefreshApply_CommentsErrorPreservesCache(t *testing.T) {
 	gu := &Gui{st: newState()}
 	// Seed the task list so selectedTask() returns something.
@@ -255,6 +256,7 @@ func (f *fallbackFakeDS) Fallbacks() uint64 { return f.count }
 // must have its loadedAt zeroed so the next selection-driven
 // hydration (or the queued OnWorker dispatch) re-fetches the
 // archive.
+func (*fallbackFakeDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestRefreshApply_RunningToTerminalInvalidatesArchive(t *testing.T) {
 	gu := &Gui{st: newState()}
 	gu.ds = &refreshFakeDS{}

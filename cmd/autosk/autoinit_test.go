@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"autosk/internal/globalworkflow"
 )
 
 // withInteractiveStdin swaps the package-level TTY check + stdin
@@ -206,8 +210,15 @@ func TestAutoInit_JSONSuppressesPrompt(t *testing.T) {
 	if strings.Contains(out, "Create a new autosk database") {
 		t.Errorf("--json should not surface the interactive prompt:\n%s", out)
 	}
-	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
-		t.Errorf("--json auto-init should still bootstrap:\n%s", out)
+	// Bootstrap stdout is suppressed when --json is active so the
+	// stdout stream stays a single JSON document. Verify the workflow
+	// was actually seeded by listing workflows.
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "feature-dev-generic") {
+		t.Errorf("--json auto-init should still bootstrap workflow:\n%s", list)
 	}
 }
 
@@ -263,6 +274,222 @@ func TestAutoInit_ExistingDBNoPrompt(t *testing.T) {
 	}
 }
 
+// TestAutoInit_SyncsGlobalWorkflows covers that auto-init from a write
+// verb syncs enabled global workflows after bootstrap.
+func TestAutoInit_SyncsGlobalWorkflows(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if !strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("expected global workflow sync line:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "global-wf") {
+		t.Errorf("workflow list missing synced global workflow:\n%s", list)
+	}
+}
+
+// TestAutoInit_SkipGlobalWorkflowsEnv covers the
+// AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out: a write verb on a
+// fresh dir still creates the DB and bootstraps, but leaves global
+// workflows unsynced.
+func TestAutoInit_SkipGlobalWorkflowsEnv(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS", "1")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if strings.Contains(out, "workflow global-wf: added") {
+		t.Errorf("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS should not sync global workflows:\n%s", out)
+	}
+	list, err := runRoot(t, dir, "workflow", "list")
+	if err != nil {
+		t.Fatalf("workflow list: %v\n%s", err, list)
+	}
+	if strings.Contains(list, "global-wf") {
+		t.Errorf("AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS should leave global workflow absent:\n%s", list)
+	}
+}
+
+// TestAutoInit_GlobalWorkflowSyncFailureNonFatal covers that a global
+// workflow sync failure during auto-init is a warning, not a fatal
+// error: the write command still succeeds, the DB is created, and the
+// warning mentions the AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out.
+func TestAutoInit_GlobalWorkflowSyncFailureNonFatal(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("bad-global", "@noone/here", "bad global")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "create", "smoke")
+	if err != nil {
+		t.Fatalf("create on fresh dir should succeed despite sync failure: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("expected a 'warning' line on stderr:\n%s", out)
+	}
+	if !strings.Contains(out, "sync global workflows") {
+		t.Errorf("expected the global-workflow-sync-flavour warning, got:\n%s", out)
+	}
+	if !strings.Contains(out, "AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS") {
+		t.Errorf("warning should advertise AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS opt-out; got:\n%s", out)
+	}
+	if !strings.Contains(out, "bootstrapped workflow feature-dev-generic") {
+		t.Errorf("expected auto-init to still bootstrap feature-dev-generic, got:\n%s", out)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, ".autosk", "db")); serr != nil {
+		t.Errorf(".autosk/db not created after auto-init with sync failure: %v", serr)
+	}
+	// Verify the task was actually created.
+	list, err := runRoot(t, dir, "list")
+	if err != nil {
+		t.Fatalf("list: %v\n%s", err, list)
+	}
+	if !strings.Contains(list, "smoke") {
+		t.Errorf("task 'smoke' should exist after auto-init:\n%s", list)
+	}
+}
+
+// TestAutoInit_JSONCreatesSingleJSONDocument is a regression test for
+// the auto-init path when the outer command runs with --json.
+// syncGlobalWorkflows must not emit its own JSON report to stdout,
+// because that would produce two concatenated JSON documents and break
+// consumers expecting a single task JSON object.
+func TestAutoInit_JSONCreatesSingleJSONDocument(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	r := withIsolatedGlobalWorkflows(t)
+	def := cliSyncDefinition("global-wf", "@autosk/dev-fixture", "global workflow")
+	if _, err := r.StoreDefinition(def, globalworkflow.StoreOptions{Revision: "rev-1"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	out, err := runRoot(t, dir, "--json", "create", "smoke")
+	if err != nil {
+		t.Fatalf("--json create on fresh dir: %v\n%s", err, out)
+	}
+	// Count JSON-object-looking lines. There must be exactly one
+	// (the task JSON from create --json). A regression where
+	// emitWorkflowSyncReport also wrote to stdout would add a second.
+	var jsonLines []string
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+			jsonLines = append(jsonLines, trimmed)
+		}
+	}
+	if len(jsonLines) != 1 {
+		t.Fatalf("expected exactly one JSON object in output, got %d:\n%s", len(jsonLines), out)
+	}
+	var task map[string]any
+	if err := json.Unmarshal([]byte(jsonLines[0]), &task); err != nil {
+		t.Fatalf("task JSON is invalid: %v\nraw:\n%s", err, jsonLines[0])
+	}
+	if task["title"] != "smoke" {
+		t.Errorf("expected task title 'smoke', got %v", task["title"])
+	}
+}
+
+// TestAutoInit_JSONStdoutIsSingleDocument is a regression test that
+// auto-init with --json does not emit non-JSON text to stdout.
+// bootstrapDefaultWorkflow prints "bootstrapped workflow ..." to stdout
+// by default; when the outer command uses --json that output must be
+// suppressed so the stdout stream is exactly one JSON document.
+func TestAutoInit_JSONStdoutIsSingleDocument(t *testing.T) {
+	withIsolatedPackagesPrefix(t)
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "")
+	dir := t.TempDir()
+
+	stdout, err := runRootStdoutOnly(t, dir, "--json", "create", "smoke")
+	if err != nil {
+		t.Fatalf("create --json on fresh dir: %v\nstdout=%s", err, stdout)
+	}
+	stdout = strings.TrimSpace(stdout)
+	var task map[string]any
+	if err := json.Unmarshal([]byte(stdout), &task); err != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\nstdout=%s", err, stdout)
+	}
+	if task["title"] != "smoke" {
+		t.Errorf("expected task title 'smoke', got %v", task["title"])
+	}
+}
+
+// runRootStdoutOnly runs the CLI in dir, capturing only stdout.
+// Stderr is left untouched. It applies the same env isolation as runRoot.
+func runRootStdoutOnly(t *testing.T, dir string, argv ...string) (string, error) {
+	t.Helper()
+	t.Setenv("AUTOSK_DB", "")
+	t.Setenv("AUTOSK_NO_AUTOINIT", "")
+	if _, set := os.LookupEnv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP"); !set {
+		t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "1")
+	}
+	if _, set := os.LookupEnv("AUTOSK_WORKFLOWS"); !set {
+		t.Setenv("AUTOSK_WORKFLOWS", filepath.Join(t.TempDir(), "workflows"))
+	}
+
+	root := newRootCmd()
+	root.SetArgs(argv)
+
+	origStdout := os.Stdout
+	rPipe, wPipe, _ := os.Pipe()
+	os.Stdout = wPipe
+	root.SetOut(wPipe)
+
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		os.Stdout = origStdout
+		t.Fatalf("chdir %s: %v", dir, err)
+	}
+	defer func() {
+		_ = os.Chdir(cwd)
+		os.Stdout = origStdout
+	}()
+
+	var out bytes.Buffer
+	doneCh := make(chan struct{})
+	go func() {
+		_, _ = out.ReadFrom(rPipe)
+		close(doneCh)
+	}()
+	err := root.Execute()
+	_ = wPipe.Close()
+	<-doneCh
+	return out.String(), err
+}
+
 // blockingReader is used by tests that want to prove no read happens.
 // Calling Read would block forever on a real terminal; here we panic
 // so a regression is loud rather than mysterious.
@@ -274,3 +501,28 @@ func (blockingReader) Read(_ []byte) (int, error) {
 
 // Compile-time assertion: blockingReader implements io.Reader.
 var _ io.Reader = blockingReader{}
+
+// TestAutoInit_SkipBootstrapStillCreatesPackagesPrefix covers that
+// AUTOSK_AUTOINIT_SKIP_BOOTSTRAP suppresses the built-in workflow seed
+// but still ensures the packages prefix is created, matching the
+// explicit `autosk init --skip-bootstrap` behaviour.
+func TestAutoInit_SkipBootstrapStillCreatesPackagesPrefix(t *testing.T) {
+	t.Setenv("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP", "1")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+
+	if _, err := runRoot(t, dir, "create", "smoke"); err != nil {
+		t.Fatalf("create on fresh dir: %v", err)
+	}
+	// The default packages prefix (~/.autosk/packages) should exist even
+	// when AUTOSK_AUTOINIT_SKIP_BOOTSTRAP is set.
+	pkgPrefix := filepath.Join(home, ".autosk", "packages")
+	if _, err := os.Stat(pkgPrefix); err != nil {
+		t.Errorf("packages prefix should be created even with AUTOSK_AUTOINIT_SKIP_BOOTSTRAP: %v", err)
+	}
+	list, _ := runRoot(t, dir, "workflow", "list")
+	if strings.Contains(list, "feature-dev-generic") {
+		t.Errorf("AUTOSK_AUTOINIT_SKIP_BOOTSTRAP should leave workflow empty:\n%s", list)
+	}
+}

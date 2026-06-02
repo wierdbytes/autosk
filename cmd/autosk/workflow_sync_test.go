@@ -17,7 +17,7 @@ func TestWorkflowSync_AddsGlobalWorkflowAndAutoInstallsAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if _, err := runRoot(t, dir, "init", "--skip-bootstrap"); err != nil {
+	if _, err := runRoot(t, dir, "init", "--skip-bootstrap", "--skip-global-workflows"); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -60,7 +60,7 @@ func TestWorkflowSync_DryRunDoesNotMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if _, err := runRoot(t, dir, "init", "--skip-bootstrap"); err != nil {
+	if _, err := runRoot(t, dir, "init", "--skip-bootstrap", "--skip-global-workflows"); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 
@@ -91,7 +91,7 @@ func TestWorkflowSync_ConflictDoesNotOverwrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	if _, err := runRoot(t, dir, "init", "--skip-bootstrap"); err != nil {
+	if _, err := runRoot(t, dir, "init", "--skip-bootstrap", "--skip-global-workflows"); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	localPath := writeTempWorkflowJSON(t, dir, humanWorkflowJSON("same-name"))

@@ -243,5 +243,5 @@ func writeJSON(path string, v any) error {
 // trimSlash drops a leading "./" so resolve paths inside a package join
 // cleanly against the install dir.
 func trimSlash(p string) string {
-	return strings.TrimPrefix(strings.TrimPrefix(p, "./"), "/")
+	return strings.TrimPrefix(p, "./")
 }

@@ -31,6 +31,7 @@ func (f *fakeMetaDS) SetMetadata(_ context.Context, id string, m map[string]any)
 // branch: when t.Metadata is nil or empty the popup is seeded with
 // "{}" so the user can type into a non-blank but unambiguous JSON
 // object scaffold.
+func (*fakeMetaDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) { return datasource.SyncReport{}, nil }
 func TestTaskMetadataEditEmptyShowsCurlies(t *testing.T) {
 	gu := &Gui{st: newState()}
 	gu.st.tasks = []datasource.Task{{ID: "ask-eeeeee"}}

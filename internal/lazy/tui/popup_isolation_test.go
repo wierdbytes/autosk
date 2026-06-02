@@ -135,6 +135,9 @@ func (f *fakeIsolationDS) UpdateWorkflowIsolation(_ context.Context, name, mode 
 // runWorkerSync runs every worker callback in-line so the popup
 // flow's gu.g.OnWorker invocations dispatch synchronously and the
 // test can observe the datasource call right after popupConfirmYes.
+func (*fakeIsolationDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) {
+	return datasource.SyncReport{}, nil
+}
 func runWorkerSync(t *testing.T) (*gocui.Gui, func()) {
 	t.Helper()
 	g, err := gocui.NewGui(gocui.NewGuiOpts{
@@ -426,3 +429,237 @@ var _ datasource.Datasource = (*fakeIsolationDS)(nil)
 // silence unused-import lints for the helpers that may be elided
 // once more tests fill in.
 var _ = errors.New
+
+// ---- workflow sync tests ------------------------------------------------
+
+// fakeSyncDS captures the SyncWorkflows call for testing the TUI handler.
+type fakeSyncDS struct {
+	refreshFakeDS
+	mu        sync.Mutex
+	called    bool
+	gotDryRun bool
+	gotForce  bool
+	report    datasource.SyncReport
+	returnErr error
+}
+
+func (f *fakeSyncDS) SyncWorkflows(_ context.Context, dryRun, force bool) (datasource.SyncReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.called = true
+	f.gotDryRun = dryRun
+	f.gotForce = force
+	return f.report, f.returnErr
+}
+
+// TestWorkflowSync_KeyBoundOnWorkflows pins that `s` is bound on the
+// Workflows panel and NOT globally.
+func TestWorkflowSync_KeyBoundOnWorkflows(t *testing.T) {
+	g, err := gocui.NewGui(gocui.NewGuiOpts{
+		OutputMode: gocui.OutputNormal,
+		Headless:   true,
+		Width:      80,
+		Height:     24,
+	})
+	if err != nil {
+		t.Fatalf("gocui new: %v", err)
+	}
+	defer g.Close()
+	gu := &Gui{g: g, st: newState()}
+	if err := gu.bindKeys(); err != nil {
+		t.Fatalf("bindKeys: %v", err)
+	}
+	if err := g.DeleteKeybinding(winWorkflows, 's', gocui.ModNone); err != nil {
+		t.Fatalf("`s` should be bound on winWorkflows; got %v", err)
+	}
+	if err := g.DeleteKeybinding("", 's', gocui.ModNone); err == nil {
+		t.Fatalf("`s` should NOT be globally bound")
+	}
+}
+
+// TestWorkflowSync_FlashesSummaryAndLogsDetails drives the sync
+// handler end-to-end and asserts on the flash + command-log output.
+func TestWorkflowSync_FlashesSummaryAndLogsDetails(t *testing.T) {
+	g, done := runWorkerSync(t)
+	defer done()
+	fake := &fakeSyncDS{
+		report: datasource.SyncReport{
+			Workflows: []datasource.SyncWorkflowReport{
+				{Name: "wf-a", Status: "added", Mutated: true},
+				{Name: "wf-b", Status: "noop", Mutated: false},
+				{Name: "wf-c", Status: "conflict", Reason: "local workflow with same name has no global origin"},
+			},
+		},
+	}
+	gu := &Gui{g: g, st: newState(), ctx: context.Background()}
+	gu.ds = fake
+	gu.dispatch = func(f func()) { f() } // sync-on-worker
+
+	if err := gu.workflowSync(nil, nil); err != nil {
+		t.Fatalf("workflowSync: %v", err)
+	}
+	if !fake.called {
+		t.Fatal("SyncWorkflows was not called")
+	}
+	if fake.gotDryRun {
+		t.Error("expected dryRun=false by default")
+	}
+	if fake.gotForce {
+		t.Error("expected force=false by default")
+	}
+	if !strings.Contains(gu.st.flash.Text, "1 added, 1 noop, 1 conflict") {
+		t.Errorf("flash text=%q want 1 added, 1 noop, 1 conflict", gu.st.flash.Text)
+	}
+	log := strings.Join(gu.st.logBuf, "\n")
+	for _, want := range []string{
+		"sync wf-a: added",
+		"sync wf-b: noop",
+		"sync wf-c: conflict (local workflow with same name has no global origin)",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q; full log:\n%s", want, log)
+		}
+	}
+}
+
+// TestWorkflowSync_ErrorFlashesAndStillLogsDetails verifies that even
+// when SyncWorkflows returns an error, the per-workflow lines are
+// appended to the command log.
+func TestWorkflowSync_ErrorFlashesAndStillLogsDetails(t *testing.T) {
+	g, done := runWorkerSync(t)
+	defer done()
+	fake := &fakeSyncDS{
+		report: datasource.SyncReport{
+			Workflows: []datasource.SyncWorkflowReport{
+				{Name: "wf-x", Status: "error", Error: "parse failed"},
+			},
+		},
+		returnErr: errors.New("global workflow sync failed"),
+	}
+	gu := &Gui{g: g, st: newState(), ctx: context.Background()}
+	gu.ds = fake
+	gu.dispatch = func(f func()) { f() }
+
+	if err := gu.workflowSync(nil, nil); err != nil {
+		t.Fatalf("workflowSync: %v", err)
+	}
+	if !strings.Contains(gu.st.flash.Text, "workflow sync failed") {
+		t.Errorf("flash text=%q want error mention", gu.st.flash.Text)
+	}
+	log := strings.Join(gu.st.logBuf, "\n")
+	if !strings.Contains(log, "sync wf-x: error: parse failed") {
+		t.Errorf("log missing wf-x error line; full log:\n%s", log)
+	}
+}
+
+// TestWorkflowSync_ErrorWithMultipleRowsFlashesSummary verifies that
+// when SyncWorkflows returns an error alongside a non-empty report,
+// the flash includes the status-count summary (e.g. 1 added, 1 error).
+func TestWorkflowSync_ErrorWithMultipleRowsFlashesSummary(t *testing.T) {
+	g, done := runWorkerSync(t)
+	defer done()
+	fake := &fakeSyncDS{
+		report: datasource.SyncReport{
+			Workflows: []datasource.SyncWorkflowReport{
+				{Name: "wf-a", Status: "added", Mutated: true},
+				{Name: "wf-b", Status: "error", Error: "disk full"},
+			},
+		},
+		returnErr: errors.New("partial sync failed"),
+	}
+	gu := &Gui{g: g, st: newState(), ctx: context.Background()}
+	gu.ds = fake
+	gu.dispatch = func(f func()) { f() }
+
+	if err := gu.workflowSync(nil, nil); err != nil {
+		t.Fatalf("workflowSync: %v", err)
+	}
+	if !strings.Contains(gu.st.flash.Text, "workflow sync failed: 1 added, 1 error") {
+		t.Errorf("flash text=%q want 'workflow sync failed: 1 added, 1 error'", gu.st.flash.Text)
+	}
+	log := strings.Join(gu.st.logBuf, "\n")
+	for _, want := range []string{
+		"sync wf-a: added",
+		"sync wf-b: error: disk full",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q; full log:\n%s", want, log)
+		}
+	}
+}
+
+// TestWorkflowSync_ConflictAndSkippedNoMutated verifies that a sync
+// report containing only conflict/skipped rows (no Mutated entries)
+// still flashes a meaningful summary instead of "everything up to
+// date".
+func TestWorkflowSync_ConflictAndSkippedNoMutated(t *testing.T) {
+	g, done := runWorkerSync(t)
+	defer done()
+	fake := &fakeSyncDS{
+		report: datasource.SyncReport{
+			Workflows: []datasource.SyncWorkflowReport{
+				{Name: "wf-a", Status: "conflict", Reason: "local workflow with same name has no global origin"},
+				{Name: "wf-b", Status: "skipped", Reason: "stale global workflow without --force"},
+			},
+		},
+	}
+	gu := &Gui{g: g, st: newState(), ctx: context.Background()}
+	gu.ds = fake
+	gu.dispatch = func(f func()) { f() }
+
+	if err := gu.workflowSync(nil, nil); err != nil {
+		t.Fatalf("workflowSync: %v", err)
+	}
+	if !strings.Contains(gu.st.flash.Text, "1 skipped, 1 conflict") {
+		t.Errorf("flash text=%q want 1 skipped, 1 conflict", gu.st.flash.Text)
+	}
+	log := strings.Join(gu.st.logBuf, "\n")
+	for _, want := range []string{
+		"sync wf-a: conflict (local workflow with same name has no global origin)",
+		"sync wf-b: skipped (stale global workflow without --force)",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log missing %q; full log:\n%s", want, log)
+		}
+	}
+}
+
+// TestWorkflowSync_AutoInstalledAgentsLogged verifies that when a
+// sync report row includes AutoInstalledAgents, the command log
+// emits an auto_agents line so the operator can see which packages
+// were installed during sync.
+func TestWorkflowSync_AutoInstalledAgentsLogged(t *testing.T) {
+	g, done := runWorkerSync(t)
+	defer done()
+	fake := &fakeSyncDS{
+		report: datasource.SyncReport{
+			Workflows: []datasource.SyncWorkflowReport{
+				{Name: "wf-a", Status: "added", Mutated: true, AutoInstalledAgents: []string{"@autosk/dev@0.2.5", "@autosk/review@1.0.0"}},
+				{Name: "wf-b", Status: "noop", Mutated: false},
+			},
+		},
+	}
+	gu := &Gui{g: g, st: newState(), ctx: context.Background()}
+	gu.ds = fake
+	gu.dispatch = func(f func()) { f() }
+
+	if err := gu.workflowSync(nil, nil); err != nil {
+		t.Fatalf("workflowSync: %v", err)
+	}
+	log := strings.Join(gu.st.logBuf, "\n")
+	if !strings.Contains(log, "sync wf-a: added") {
+		t.Errorf("log missing wf-a line; full log:\n%s", log)
+	}
+	if !strings.Contains(log, "  auto_agents: @autosk/dev@0.2.5, @autosk/review@1.0.0") {
+		t.Errorf("log missing auto_agents line; full log:\n%s", log)
+	}
+	// noop row must NOT produce an auto_agents line.
+	if strings.Contains(log, "auto_agents:") && strings.Index(log, "auto_agents:") != strings.LastIndex(log, "auto_agents:") {
+		// More than one auto_agents occurrence.
+		t.Errorf("noop wf-b should not produce auto_agents; full log:\n%s", log)
+	}
+}
+
+func (*errIsolationFailDS) SyncWorkflows(_ context.Context, _, _ bool) (datasource.SyncReport, error) {
+	return datasource.SyncReport{}, nil
+}
