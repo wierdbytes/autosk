@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,70 @@ func withJSONStdoutSilenced(fn func() error) error {
 	os.Stdout = devNull
 	defer func() { os.Stdout = orig }()
 	return fn()
+}
+
+// withInstallStdoutSilenced discards stdout produced by npm installs when
+// --json or --quiet is active, so the final output stream stays clean for
+// machine-readable callers or quiet-mode operators.
+//
+// In --json mode only stdout is silenced; stderr is left untouched so
+// actionable errors remain visible.
+//
+// In --quiet mode both stdout and stderr are captured. On success the
+// captured output is discarded. On failure a concise tail of the
+// captured stderr is included in the returned error so diagnostics are
+// not lost.
+func withInstallStdoutSilenced(fn func() error) error {
+	if !flagJSON && !flagQuiet {
+		return fn()
+	}
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = devNull.Close() }()
+	origStdout := os.Stdout
+	os.Stdout = devNull
+	defer func() { os.Stdout = origStdout }()
+
+	if !flagQuiet {
+		// JSON mode only: suppress stdout, leave stderr alone.
+		return fn()
+	}
+
+	// Quiet mode: capture stderr too so npm progress/warnings do not
+	// leak to the terminal.
+	var stderrBuf bytes.Buffer
+	r, w, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&stderrBuf, r)
+		close(done)
+	}()
+
+	err = fn()
+	_ = w.Close()
+	os.Stderr = origStderr
+	<-done
+	_ = r.Close()
+
+	if err != nil {
+		tail := stderrBuf.String()
+		const maxTail = 500
+		if len(tail) > maxTail {
+			tail = "..." + tail[len(tail)-maxTail:]
+		}
+		if tail != "" {
+			return fmt.Errorf("%w\nnpm stderr: %s", err, tail)
+		}
+	}
+	return err
 }
 
 // resolveInstallSpec translates the first argument to `autosk agent

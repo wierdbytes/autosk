@@ -61,7 +61,7 @@ type packageManifest struct {
 }
 
 type autoskManifest struct {
-	Agent     *agentManifest     `json:"agent,omitempty"`
+	Agent     *AgentManifest     `json:"agent,omitempty"`
 	Workflows []workflowManifest `json:"workflows,omitempty"`
 }
 
@@ -70,7 +70,7 @@ type workflowManifest struct {
 	File string `json:"file"`
 }
 
-type agentManifest struct {
+type AgentManifest struct {
 	Runner           string   `json:"runner,omitempty"`
 	Model            string   `json:"model,omitempty"`
 	Thinking         string   `json:"thinking,omitempty"`
@@ -211,7 +211,80 @@ func (r *Registry) loadManifest(name string) (Entry, string, packageManifest, er
 	return entry, installDir, m, nil
 }
 
-func resolveAgentConfig(name, version, installDir string, am *agentManifest) (PackageConfig, error) {
+// ValidateAgentManifest validates the autosk.agent block of a package
+// manifest without requiring the package to be registered or any on-disk
+// file existence checks. Exported so the CLI can preview local packages.
+func ValidateAgentManifest(name string, am *AgentManifest) error {
+	if _, ok := validThinking[am.Thinking]; !ok {
+		return fmt.Errorf("%w: %s thinking=%q (want one of off|minimal|low|medium|high|xhigh)",
+			ErrPackageMalformed, name, am.Thinking)
+	}
+	if am.FirstMessage != "" && am.FirstMessageFile != "" {
+		return fmt.Errorf("%w: %s declares both first_message and first_message_file (pick one)",
+			ErrPackageMalformed, name)
+	}
+	return nil
+}
+
+// ValidateAgentConfig performs the full agent config validation that
+// Resolve/ResolveAgentIfPresent perform, including path resolution and
+// file existence checks, without requiring the package to be registered.
+// Exported so the CLI can preview local packages accurately.
+func ValidateAgentConfig(name, installDir string, am *AgentManifest) error {
+	if _, ok := validThinking[am.Thinking]; !ok {
+		return fmt.Errorf("%w: %s thinking=%q (want one of off|minimal|low|medium|high|xhigh)",
+			ErrPackageMalformed, name, am.Thinking)
+	}
+	if am.FirstMessage != "" && am.FirstMessageFile != "" {
+		return fmt.Errorf("%w: %s declares both first_message and first_message_file (pick one)",
+			ErrPackageMalformed, name)
+	}
+	if am.Runner != "" {
+		runnerAbs, err := resolveInsidePkg(installDir, am.Runner)
+		if err != nil {
+			return fmt.Errorf("%w: %s runner %q: %v", ErrPackageMalformed, name, am.Runner, err)
+		}
+		if _, err := os.Stat(runnerAbs); err != nil {
+			return fmt.Errorf("%w: %s runner missing: %s", ErrPackageMalformed, name, runnerAbs)
+		}
+	}
+	if am.FirstMessageFile != "" {
+		abs, err := resolveInsidePkg(installDir, am.FirstMessageFile)
+		if err != nil {
+			return fmt.Errorf("%w: %s first_message_file %q: %v",
+				ErrPackageMalformed, name, am.FirstMessageFile, err)
+		}
+		if _, err := os.ReadFile(abs); err != nil {
+			return fmt.Errorf("%w: %s read first_message_file %s: %v",
+				ErrPackageMalformed, name, abs, err)
+		}
+	}
+	for _, ext := range am.PiExtensions {
+		abs, err := resolveInsidePkg(installDir, ext)
+		if err != nil {
+			return fmt.Errorf("%w: %s pi_extensions[%q]: %v",
+				ErrPackageMalformed, name, ext, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return fmt.Errorf("%w: %s pi_extension missing: %s",
+				ErrPackageMalformed, name, abs)
+		}
+	}
+	for _, sk := range am.PiSkills {
+		abs, err := resolveInsidePkg(installDir, sk)
+		if err != nil {
+			return fmt.Errorf("%w: %s pi_skills[%q]: %v",
+				ErrPackageMalformed, name, sk, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return fmt.Errorf("%w: %s pi_skill missing: %s",
+				ErrPackageMalformed, name, abs)
+		}
+	}
+	return nil
+}
+
+func resolveAgentConfig(name, version, installDir string, am *AgentManifest) (PackageConfig, error) {
 	if _, ok := validThinking[am.Thinking]; !ok {
 		return PackageConfig{}, fmt.Errorf("%w: %s thinking=%q (want one of off|minimal|low|medium|high|xhigh)",
 			ErrPackageMalformed, name, am.Thinking)
@@ -284,10 +357,10 @@ func resolveAgentConfig(name, version, installDir string, am *agentManifest) (Pa
 // resolveInsidePkg joins rel to installDir and rejects any result that
 // escapes the package directory.
 func resolveInsidePkg(installDir, rel string) (string, error) {
-	rel = trimSlash(rel)
 	if filepath.IsAbs(rel) {
 		return "", fmt.Errorf("absolute paths are not allowed: %s", rel)
 	}
+	rel = trimSlash(rel)
 	abs := filepath.Join(installDir, rel)
 	clean, err := filepath.Abs(abs)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1024,8 +1025,14 @@ func (o *Offline) SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncRe
 	rep, err := globalworkflow.SyncGlobalWorkflows(ctx, reg, ws, globalworkflow.SyncOptions{
 		DryRun: dryRun,
 		Force:  force,
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
-			return autoInstallMissingAgents(ctx, def, ws.Agents(), o.s, o.registry)
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
+			versions := map[string]string{}
+			if entry.SourceType == "package" && entry.Source != "" {
+				if v, ok := entry.SourceMetadata["version"].(string); ok && v != "" {
+					versions[entry.Source] = v
+				}
+			}
+			return autoInstallMissingAgents(ctx, def, ws.Agents(), o.s, o.registry, versions)
 		},
 	})
 	if !dryRun && rep.Mutated() {
@@ -1038,7 +1045,7 @@ func (o *Offline) SyncWorkflows(ctx context.Context, dryRun, force bool) (SyncRe
 // the TUI sync path behaves identically. The pkgregistry.Registry
 // argument is optional (may be nil in tests); when nil scoped agents
 // are skipped (they'll produce validation errors later).
-func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, reg *pkgregistry.Registry) ([]pkgregistry.Entry, error) {
+func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, reg *pkgregistry.Registry, versions map[string]string) ([]pkgregistry.Entry, error) {
 	if reg == nil {
 		return nil, nil
 	}
@@ -1071,13 +1078,33 @@ func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *
 	agWithResolver := agent.New(dl.DB()).WithResolver(reg)
 	installed := make([]pkgregistry.Entry, 0, len(todo))
 	for _, name := range todo {
-		entry, ierr := reg.Install(ctx, name, "")
-		if ierr != nil {
-			return installed, fmt.Errorf("auto-install %s failed: %w (install manually with `autosk agent install %s`)", name, ierr, name)
+		var entry pkgregistry.Entry
+		_, stderr, err := withStdioSilenced(func() error {
+			var ierr error
+			ver := ""
+			if versions != nil {
+				ver = versions[name]
+			}
+			entry, ierr = reg.Install(ctx, name, ver)
+			return ierr
+		})
+		if err != nil {
+			msg := fmt.Sprintf("auto-install %s failed: %v (install manually with `autosk agent install %s`)", name, err, name)
+			if stderr != "" {
+				msg = fmt.Sprintf("auto-install %s failed: %v (stderr: %s) (install manually with `autosk agent install %s`)", name, err, strings.TrimSpace(stderr), name)
+			}
+			return installed, errors.New(msg)
 		}
 		if cfg, rerr := reg.Resolve(entry.Name); rerr == nil && cfg.Runner != "" {
-			if err := reg.EnsureRuntime(ctx, ""); err != nil {
-				return installed, fmt.Errorf("install runtime for custom-runner agent %s: %w", entry.Name, err)
+			_, stderr, err := withStdioSilenced(func() error {
+				return reg.EnsureRuntime(ctx, "")
+			})
+			if err != nil {
+				msg := fmt.Sprintf("install runtime for custom-runner agent %s: %v", entry.Name, err)
+				if stderr != "" {
+					msg = fmt.Sprintf("install runtime for custom-runner agent %s: %v (stderr: %s)", entry.Name, err, strings.TrimSpace(stderr))
+				}
+				return installed, errors.New(msg)
 			}
 		}
 		if _, eerr := agWithResolver.EnsureByName(ctx, entry.Name); eerr != nil {
@@ -1086,6 +1113,47 @@ func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *
 		installed = append(installed, entry)
 	}
 	return installed, nil
+}
+
+// withStdioSilenced redirects stdout and stderr during fn so that
+// subprocess output does not corrupt the gocui TUI screen. It returns
+// the captured stdout, stderr, and any error from fn. If fn fails,
+// callers should include captured stderr in the returned error so
+// diagnostics are not lost.
+func withStdioSilenced(fn func() error) (string, string, error) {
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return "", "", err
+	}
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		return "", "", err
+	}
+
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout = outW
+	os.Stderr = errW
+
+	// Drain pipes concurrently so fn() cannot deadlock on a full
+	// pipe buffer (typically 64 KiB).
+	outDone := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(outR)
+		outDone <- string(b)
+	}()
+	errDone := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(errR)
+		errDone <- string(b)
+	}()
+
+	fnErr := fn()
+
+	os.Stdout, os.Stderr = origOut, origErr
+	_ = outW.Close()
+	_ = errW.Close()
+
+	return <-outDone, <-errDone, fnErr
 }
 
 func looksLikeScopedNpmName(s string) bool {

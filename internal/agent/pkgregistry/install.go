@@ -117,7 +117,7 @@ func (r *Registry) InstallWorkflowSpec(ctx context.Context, name, spec string) (
 }
 
 func (r *Registry) installSpec(ctx context.Context, name, spec string, validate func(string) error) (Entry, error) {
-	if err := validatePkgName(name); err != nil {
+	if err := ValidatePkgName(name); err != nil {
 		return Entry{}, err
 	}
 	if spec == "" {
@@ -209,7 +209,9 @@ func (r *Registry) EnsureRuntime(ctx context.Context, version string) error {
 // validatePkgName runs the minimum sanity checks before shelling npm.
 // We don't try to fully replicate npm's validate-npm-package-name
 // algorithm; npm itself will reject ill-formed names on install.
-func validatePkgName(name string) error {
+// ValidatePkgName runs the minimum sanity checks before shelling npm.
+// Exported so the CLI can pre-validate local package specs.
+func ValidatePkgName(name string) error {
 	if name == "" {
 		return fmt.Errorf("empty package name")
 	}

@@ -105,28 +105,37 @@ func openStore(ctx context.Context, writeOK bool) (store.Store, func(), error) {
 		//   - AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS skips global workflow sync.
 		// These env vars cover test helpers and pipelines that want a
 		// strictly minimal DB or need to avoid npm/registry touches.
-		if os.Getenv(EnvAutoInitSkipBootstrap) == "" {
-			if reg, perr := openPackagesRegistry(); perr == nil {
-				if err := reg.EnsurePrefix(); err != nil && !flagQuiet {
-					fmt.Fprintf(os.Stderr,
-						"warning: could not create packages prefix at %s: %v\n",
-						reg.Prefix(), err)
-				}
+		if reg, perr := openPackagesRegistry(); perr == nil {
+			if err := reg.EnsurePrefix(); err != nil && !flagQuiet {
+				fmt.Fprintf(os.Stderr,
+					"warning: could not create packages prefix at %s: %v\n",
+					reg.Prefix(), err)
 			}
-			if berr := bootstrapDefaultWorkflow(ctx, s); berr != nil {
+		}
+		if os.Getenv(EnvAutoInitSkipBootstrap) == "" {
+			// Silence bootstrap stdout (including npm progress) when the
+			// outer command runs with --json or --quiet, so auto-init does
+			// not break the one-JSON-document contract and quiet mode
+			// stays clean. Warnings still land on stderr.
+			berr := withInstallStdoutSilenced(func() error {
+				return bootstrapDefaultWorkflow(ctx, s)
+			})
+			if berr != nil {
 				fmt.Fprintf(os.Stderr,
 					"warning: could not bootstrap default workflow: %v (set %s=1 to suppress this step)\n",
 					berr, EnvAutoInitSkipBootstrap)
 			}
 		}
 		if os.Getenv(EnvAutoInitSkipGlobalWorkflows) == "" {
-			// Suppress the sync report to stdout when the outer command
-			// runs with --json, so auto-init does not break the
-			// one-JSON-document contract. Warnings still land on stderr.
-			if serr := syncGlobalWorkflows(ctx, s, flagJSON); serr != nil {
-				fmt.Fprintf(os.Stderr,
-					"warning: could not sync global workflows: %v (set %s=1 to suppress this step)\n",
-					serr, EnvAutoInitSkipGlobalWorkflows)
+			if _, skip := ctx.Value(skipAutoInitGlobalSyncKey{}).(bool); !skip {
+				// Suppress the sync report to stdout when the outer command
+				// runs with --json, so auto-init does not break the
+				// one-JSON-document contract. Warnings still land on stderr.
+				if serr := syncGlobalWorkflows(ctx, s, flagJSON); serr != nil {
+					fmt.Fprintf(os.Stderr,
+						"warning: could not sync global workflows: %v (set %s=1 to suppress this step)\n",
+						serr, EnvAutoInitSkipGlobalWorkflows)
+				}
 			}
 		}
 	}

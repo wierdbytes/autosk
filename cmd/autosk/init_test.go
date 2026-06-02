@@ -574,6 +574,80 @@ func TestInit_GlobalWorkflowSyncFailureNonFatal(t *testing.T) {
 	}
 }
 
+// TestInit_SyncsGlobalWorkflows_PinsPackageVersion verifies that init
+// passes the package-backed global's pinned version into agent
+// auto-install during the best-effort global workflow sync.
+func TestInit_SyncsGlobalWorkflows_PinsPackageVersion(t *testing.T) {
+	npm := &trackingWorkflowNpm{}
+	withWorkflowNpm(t, npm)
+	withIsolatedGlobalWorkflows(t)
+
+	// Create a local package whose workflow references the package itself
+	// as an agent, with a pinned version.
+	pkg := writeWorkflowPackage(t, filepath.Join(t.TempDir(), "pkg"), "@autosk/dev-fixture", "0.2.5",
+		map[string]any{
+			"workflows": []map[string]any{{"name": "versioned-init-wf", "file": "./workflow.json"}},
+			"agent": map[string]any{
+				"first_message": "You are the dev fixture.",
+				"model":         "sonnet:high",
+				"thinking":      "high",
+			},
+		},
+		map[string]string{"workflow.json": `{
+  "name": "versioned-init-wf",
+  "first_step": "do",
+  "steps": {
+    "do": {
+      "agent": { "name": "@autosk/dev-fixture" },
+      "next_steps": [{ "task_status": "done", "prompt_rule": "Done." }]
+    }
+  }
+}`})
+
+	if _, err := runRoot(t, t.TempDir(), "workflow", "global", "install", pkg, "--workflow", "versioned-init-wf"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reset install tracking so we only see init-time installs.
+	npm.installs = nil
+
+	// Run init in a fresh directory. It should sync the global workflow
+	// and auto-install the agent using the pinned version.
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "init")
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "workflow versioned-init-wf: added") {
+		t.Errorf("expected global workflow sync line:\n%s", out)
+	}
+
+	found := false
+	for _, spec := range npm.installs {
+		if spec == "@autosk/dev-fixture@0.2.5" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected npm install spec @autosk/dev-fixture@0.2.5, got %v", npm.installs)
+	}
+}
+
+// TestInit_Quiet_SilencesNpm verifies that explicit `autosk init --quiet`
+// does not leak npm stdout/stderr when bootstrapping the default workflow.
+func TestInit_Quiet_SilencesNpm(t *testing.T) {
+	withWorkflowNpm(t, loudWorkflowNpm{})
+	dir := t.TempDir()
+	out, err := runRoot(t, dir, "--quiet", "init")
+	if err != nil {
+		t.Fatalf("init --quiet: %v\n%s", err, out)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("expected no stdout under --quiet, got:\n%q", out)
+	}
+}
+
 // TestInit_GlobalWorkflowSyncFailureNonFatal_Quiet covers the quiet
 // path: even though emitWorkflowSyncReport is suppressed, the warning
 // on stderr must still carry actionable per-workflow failure details

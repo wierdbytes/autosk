@@ -2,13 +2,16 @@ package datasource_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"autosk/internal/agent"
+	"autosk/internal/agent/pkgregistry"
 	"autosk/internal/globalworkflow"
 	"autosk/internal/lazy/datasource"
 	"autosk/internal/store"
@@ -1030,5 +1033,102 @@ func TestOfflineEnroll_FromWork_Rejected(t *testing.T) {
 	sv, _ := post.Metadata["step_visits"].(map[string]any)
 	if v, _ := sv[devID].(float64); int(v) != 1 {
 		t.Errorf("step_visits[dev]=%v (want 1; refused enroll must not bump)", sv[devID])
+	}
+}
+
+// versionTrackingNpm is a fake npm runner that records every install
+// spec so tests can assert the exact version passed to npm.
+type versionTrackingNpm struct {
+	installs []string
+}
+
+func (n *versionTrackingNpm) Install(_ context.Context, prefix, spec string) error {
+	n.installs = append(n.installs, spec)
+	name := spec
+	if i := strings.LastIndex(spec, "@"); i > 0 {
+		name = spec[:i]
+	}
+	dir := filepath.Join(prefix, "node_modules", filepath.FromSlash(name))
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return err
+	}
+	pj := map[string]any{
+		"name":    name,
+		"version": "1.0.0",
+		"autosk":  map[string]any{"agent": map[string]any{"first_message": "hello"}},
+	}
+	b, _ := json.MarshalIndent(pj, "", "  ")
+	return os.WriteFile(filepath.Join(dir, "package.json"), b, 0o600)
+}
+
+func (n *versionTrackingNpm) Uninstall(_ context.Context, prefix, name string) error {
+	return os.RemoveAll(filepath.Join(prefix, "node_modules", filepath.FromSlash(name)))
+}
+
+// TestOffline_SyncWorkflows_PinsPackageVersion verifies that lazy
+// SyncWorkflows passes the package-backed global's pinned version
+// into agent auto-install.
+func TestOffline_SyncWorkflows_PinsPackageVersion(t *testing.T) {
+	ctx := context.Background()
+	_, ts, closeFn := newOfflineFx(t)
+	defer closeFn()
+
+	npm := &versionTrackingNpm{}
+	prefix := filepath.Join(t.TempDir(), "packages")
+	reg, err := pkgregistry.Open(prefix, pkgregistry.WithNpm(npm))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-create datasource with the registry so SyncWorkflows can
+	// auto-install agents.
+	ds, err := datasource.NewOffline(ts, t.TempDir(), reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed global registry with a package-backed workflow referencing
+	// a scoped agent.
+	globalDir := t.TempDir()
+	t.Setenv("AUTOSK_WORKFLOWS", globalDir)
+	gwr, err := globalworkflow.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gwr.EnsurePrefix(); err != nil {
+		t.Fatal(err)
+	}
+	def := workflow.Definition{
+		Name:      "pinned-sync-wf",
+		FirstStep: "do",
+		Steps: map[string]workflow.StepDef{
+			"do": {
+				AgentName: "@scope/pinned-agent",
+				NextSteps: []workflow.TransitionDef{{TaskStatus: "done", PromptRule: "Done."}},
+			},
+		},
+	}
+	if _, err := gwr.StoreDefinition(def, globalworkflow.StoreOptions{
+		SourceType:     "package",
+		Source:         "@scope/pinned-agent",
+		SourceMetadata: map[string]any{"version": "2.0.0"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = ds.SyncWorkflows(ctx, false, false)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	found := false
+	for _, spec := range npm.installs {
+		if spec == "@scope/pinned-agent@2.0.0" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected npm install spec @scope/pinned-agent@2.0.0, got %v", npm.installs)
 	}
 }

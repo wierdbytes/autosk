@@ -39,6 +39,21 @@ func workflowStoreFromCmd(ctx context.Context, writeOK bool) (*workflow.Store, *
 	return workflow.New(dl.DB(), ag), dl, closeFn, nil
 }
 
+// skipAutoInitGlobalSyncKey is a context key used to tell openStore
+// not to run the best-effort global-workflow sync during auto-init.
+// Explicit sync commands set this so the sync they run themselves is
+// the one that produces the report.
+type skipAutoInitGlobalSyncKey struct{}
+
+// workflowStoreFromCmdWithSkipAutoInitGlobalSync is a variant of
+// workflowStoreFromCmd that suppresses the auto-init global workflow
+// sync step. Used by `workflow sync` and `workflow global sync` so
+// the explicit command's report reflects the actual sync it performs.
+func workflowStoreFromCmdWithSkipAutoInitGlobalSync(ctx context.Context, writeOK bool) (*workflow.Store, *doltlite.Store, func(), error) {
+	ctx = context.WithValue(ctx, skipAutoInitGlobalSyncKey{}, true)
+	return workflowStoreFromCmd(ctx, writeOK)
+}
+
 func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "workflow",
@@ -56,6 +71,7 @@ func newWorkflowCmd() *cobra.Command {
 		newWorkflowDeleteCmd(),
 		newWorkflowUpdateCmd(),
 		newWorkflowSyncCmd(),
+		newWorkflowGlobalCmd(),
 	)
 	return cmd
 }
@@ -340,7 +356,7 @@ func newWorkflowCreateCmd() *cobra.Command {
 			defer closeFn()
 
 			if !noInstall {
-				if _, err := autoInstallMissingAgents(cmd.Context(), def, wf.Agents(), dl); err != nil {
+				if _, err := autoInstallMissingAgents(cmd.Context(), def, wf.Agents(), dl, nil); err != nil {
 					return fmt.Errorf("%w (pass --no-install to skip)", err)
 				}
 			}
@@ -378,7 +394,7 @@ func newWorkflowCreateCmd() *cobra.Command {
 //
 // The function is a no-op (returns nil) when every agent is either
 // `human` or already in the DB.
-func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store) ([]pkgregistry.Entry, error) {
+func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, versions map[string]string) ([]pkgregistry.Entry, error) {
 	todo, err := missingScopedWorkflowAgents(ctx, def, ag)
 	if err != nil {
 		return nil, err
@@ -409,7 +425,8 @@ func autoInstallMissingAgents(ctx context.Context, def workflow.Definition, ag *
 		if !flagQuiet && !flagJSON {
 			fmt.Fprintf(os.Stderr, "\u2192 agent install %s\n", name)
 		}
-		entry, ierr := reg.Install(ctx, name, "")
+		version := versions[name]
+		entry, ierr := reg.Install(ctx, name, version)
 		if ierr != nil {
 			// The helper deliberately does NOT mention --no-install
 			// because not every caller has that flag (e.g. `autosk init`
@@ -493,11 +510,11 @@ func registerPreinstalledWorkflowAgents(ctx context.Context, def workflow.Defini
 	return nil
 }
 
-func withAutoInstallJSONSilenced(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store) ([]pkgregistry.Entry, error) {
+func withAutoInstallJSONSilenced(ctx context.Context, def workflow.Definition, ag *agent.Store, dl *doltlite.Store, versions map[string]string) ([]pkgregistry.Entry, error) {
 	var installed []pkgregistry.Entry
-	err := withJSONStdoutSilenced(func() error {
+	err := withInstallStdoutSilenced(func() error {
 		var err error
-		installed, err = autoInstallMissingAgents(ctx, def, ag, dl)
+		installed, err = autoInstallMissingAgents(ctx, def, ag, dl, versions)
 		return err
 	})
 	return installed, err
@@ -630,7 +647,7 @@ func newWorkflowInstallCmd() *cobra.Command {
 					return err
 				}
 			} else {
-				installedAgents, err = withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl)
+				installedAgents, err = withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl, nil)
 				if err != nil {
 					return err
 				}
@@ -740,7 +757,7 @@ func newWorkflowSyncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wf, dl, closeFn, err := workflowStoreFromCmd(cmd.Context(), !dryRun)
+			wf, dl, closeFn, err := workflowStoreFromCmdWithSkipAutoInitGlobalSync(cmd.Context(), !dryRun)
 			if err != nil {
 				return err
 			}
@@ -749,8 +766,14 @@ func newWorkflowSyncCmd() *cobra.Command {
 			report, err := globalworkflow.SyncGlobalWorkflows(cmd.Context(), reg, wf, globalworkflow.SyncOptions{
 				DryRun: dryRun,
 				Force:  force,
-				InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
-					return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl)
+				InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
+					versions := map[string]string{}
+					if entry.SourceType == "package" && entry.Source != "" {
+						if v, ok := entry.SourceMetadata["version"].(string); ok && v != "" {
+							versions[entry.Source] = v
+						}
+					}
+					return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), dl, versions)
 				},
 			})
 			if !dryRun && report.Mutated() {

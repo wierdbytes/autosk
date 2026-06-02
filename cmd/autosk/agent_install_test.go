@@ -41,6 +41,20 @@ func (fakeNpmInProcess) Install(_ context.Context, prefix, spec string) error {
 		name = spec[:i]
 	}
 	dir := filepath.Join(prefix, "node_modules", filepath.FromSlash(name))
+
+	// If the package was previously installed (e.g. from a local path),
+	// preserve its on-disk shape and bump the version so update tests
+	// can detect a change.
+	existingPJ := filepath.Join(dir, "package.json")
+	if b, err := os.ReadFile(filepath.Clean(existingPJ)); err == nil {
+		var m map[string]any
+		if json.Unmarshal(b, &m) == nil {
+			m["version"] = "9.9.9"
+			b, _ = json.MarshalIndent(m, "", "  ")
+			return os.WriteFile(existingPJ, b, 0o600)
+		}
+	}
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **init:** `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS` environment variable suppresses global-workflow sync during write-command auto-init (mirrors the explicit `--skip-global-workflows` flag).
 - **workflow:** `autosk workflow install <package>` installs workflow bundles declared in npm-style packages via `package.json` `autosk.workflows`, with `--workflow`, `--version`, `--no-install`, and `--json` support.
 - **workflow:** add the global workflow registry foundation: canonical workflow definition hashes, `$AUTOSK_WORKFLOWS`/XDG workflow-prefix resolution, registry definition storage, and project-level workflow provenance rows.
+- **workflow:** complete `autosk workflow global` command surface — `add/list/show/remove/enable/disable/sync/adopt` for file-backed globals and `install/update` for package-backed globals; supports `--workflow`, `--version`, `--no-install`, `--dry-run`, `--force`, `--json`, and `--quiet` where applicable; dry-run produces structured JSON preview output with no side effects.
 - **lazy:** expose global workflows in the Workflows panel and Detail pane. Managed workflows show `[global]`, `[stale]`, and `[rev:X]` markers; the Detail pane renders source, hash, and revision lines. A new `s` binding on the Workflows panel runs `workflow sync` using the same datasource/store path as the CLI, surfacing conflicts and per-workflow outcomes via flash + command log.
 
 ### Changed

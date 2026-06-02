@@ -100,7 +100,9 @@ into the project.`,
 			// quiet only suppresses informational stdout, not the
 			// stderr signal that bootstrap silently did not happen.
 			if !skipBootstrap {
-				if err := bootstrapDefaultWorkflow(cmd.Context(), s); err != nil {
+				if err := withInstallStdoutSilenced(func() error {
+					return bootstrapDefaultWorkflow(cmd.Context(), s)
+				}); err != nil {
 					fmt.Fprintf(os.Stderr,
 						"warning: could not bootstrap default workflow: %v (re-run with --skip-bootstrap to opt out of the seed)\n",
 						err)
@@ -185,7 +187,7 @@ func bootstrapDefaultWorkflow(ctx context.Context, s *doltlite.Store) error {
 	// then deleted the workflow row). Existing unmanaged/name-only and
 	// managed no-op rows return above so init does not touch the package
 	// registry just to discover SyncManagedDefinition will skip.
-	installed, err := autoInstallMissingAgents(ctx, def, wf.Agents(), s)
+	installed, err := autoInstallMissingAgents(ctx, def, wf.Agents(), s, nil)
 	if err != nil {
 		return err
 	}
@@ -243,8 +245,14 @@ func syncGlobalWorkflows(ctx context.Context, s *doltlite.Store, suppressReport 
 	}
 	wf := workflow.New(s.DB(), agent.New(s.DB()))
 	report, err := globalworkflow.SyncGlobalWorkflows(ctx, reg, wf, globalworkflow.SyncOptions{
-		InstallAgents: func(ctx context.Context, def workflow.Definition) ([]pkgregistry.Entry, error) {
-			return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), s)
+		InstallAgents: func(ctx context.Context, def workflow.Definition, entry globalworkflow.Entry) ([]pkgregistry.Entry, error) {
+			versions := map[string]string{}
+			if entry.SourceType == "package" && entry.Source != "" {
+				if v, ok := entry.SourceMetadata["version"].(string); ok && v != "" {
+					versions[entry.Source] = v
+				}
+			}
+			return withAutoInstallJSONSilenced(ctx, def, wf.Agents(), s, versions)
 		},
 	})
 	if !flagQuiet && !suppressReport {
