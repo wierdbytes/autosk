@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **workflow:** `autosk workflow install` now accepts local package directories (e.g., `./my-workflows` or `~/pkg`) in addition to npm registry names.
+- **workflow:** auto-install of scoped npm agents during `workflow create`, `workflow install`, `autosk init`, and `workflow sync` now also ensures the Node runtime is installed for custom-runner agents.
 - **init:** `autosk init` now syncs enabled global workflows into the project after bootstrap (same behavior as `autosk workflow sync`). Add `--skip-global-workflows` to opt out.
 - **init:** `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS` environment variable suppresses global-workflow sync during write-command auto-init (mirrors the explicit `--skip-global-workflows` flag).
 - **workflow:** `autosk workflow install <package>` installs workflow bundles declared in npm-style packages via `package.json` `autosk.workflows`, with `--workflow`, `--version`, `--no-install`, and `--json` support.
@@ -16,12 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **lazy:** expose global workflows in the Workflows panel and Detail pane. Managed workflows show `[global]`, `[stale]`, and `[rev:X]` markers; the Detail pane renders source, hash, and revision lines. A new `s` binding on the Workflows panel runs `workflow sync` using the same datasource/store path as the CLI, surfacing conflicts and per-workflow outcomes via flash + command log.
 
 ### Changed
+- **agent:** `autosk agent list` and `autosk agent show` now only surface packages that declare a valid `autosk.agent` block. Workflow-only packages (packages with `autosk.workflows` but no `autosk.agent`) are excluded from agent output.
 - **init:** write-command auto-init now runs the same three post-migrate steps as explicit `autosk init`: ensure packages prefix, bootstrap `feature-dev-generic`, and sync enabled global workflows. `--skip-bootstrap` and `AUTOSK_AUTOINIT_SKIP_BOOTSTRAP` remain scoped to the built-in seed only; use `--skip-global-workflows` / `AUTOSK_AUTOINIT_SKIP_GLOBAL_WORKFLOWS` to skip global workflow sync.
 - **bootstrap:** `feature-dev-generic` workflow now ships with `isolation: worktree` by default.
 - **bootstrap:** `autosk init` now reconciles managed `feature-dev-generic` revisions by canonical hash while preserving unmanaged same-name workflows as no-ops.
 - **workflow:** `autosk workflow show` / `--json` now include `superseded_by` / `superseded_by_id` for superseded workflow revisions, and workflow names containing `@rev-` are reserved for autosk internals.
 
 ### Fixed
+- **cli:** `--json` and `--quiet` modes now suppress npm install stdout during auto-init, bootstrap, and workflow install so JSON output remains a single valid document and quiet mode stays clean.
 - **daemon:** fix empty lazy transcript and `HTTP 410 session_missing` from `daemon messages <job>`
 
 ## [0.1.5] — 2026-05-25
