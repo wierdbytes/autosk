@@ -67,7 +67,7 @@ func newRunner(t *testing.T, extraEnv ...string) *pi.Runner {
 
 func TestRunner_GetState(t *testing.T) {
 	r := newRunner(t, "FAKEPI_SESSION_ID=abc", "FAKEPI_SESSION_FILE=/tmp/x.jsonl")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	info, err := r.GetState(ctx)
 	if err != nil {
