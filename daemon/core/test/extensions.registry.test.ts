@@ -151,30 +151,34 @@ describe("validatePosition (live-code hazard)", () => {
 });
 
 describe("renderWorkflowInfo (proto-v2 projection)", () => {
-  test("per-step targets = every step (self included, sorted) + the three terminal statuses", () => {
-    const info = renderWorkflowInfo(wf("feature-dev", { description: "two-stepper" }));
+  test("per-step targets = every declared step (self included) + the three terminal statuses", () => {
+    const info = renderWorkflowInfo(
+      wf("feature-dev", {
+        description: "two-stepper",
+        steps: { recon: agentStep(), design: agentStep(), approve: statusStep("human") },
+      }),
+    );
     expect(info.name).toBe("feature-dev");
     expect(info.description).toBe("two-stepper");
     expect(info.first_step).toBe("dev");
 
-    // Steps are rendered in sorted name order.
-    expect(info.steps.map((s) => s.name)).toEqual(["accept", "dev", "review"]);
+    expect(info.steps.map((s) => s.name)).toEqual(["recon", "design", "approve"]);
 
-    const dev = info.steps.find((s) => s.name === "dev")!;
+    const design = info.steps.find((s) => s.name === "design")!;
     // An agent step renders status: null.
-    expect(dev.status).toBeNull();
+    expect(design.status).toBeNull();
     // The superset projection declares EVERY step, including the self-loop
-    // ({step:"dev"}) — a structurally valid retry target.
-    expect(dev.targets).toEqual([
-      { step: "accept" },
-      { step: "dev" },
-      { step: "review" },
+    // ({step:"design"}) — a structurally valid retry target.
+    expect(design.targets).toEqual([
+      { step: "recon" },
+      { step: "design" },
+      { step: "approve" },
       { status: "done" },
       { status: "cancel" },
       { status: "human" },
     ]);
 
-    const accept = info.steps.find((s) => s.name === "accept")!;
+    const accept = info.steps.find((s) => s.name === "approve")!;
     // A statusStep renders its park/terminal status.
     expect(accept.status).toBe("human");
   });

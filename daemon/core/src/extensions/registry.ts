@@ -216,11 +216,11 @@ function validateStep(workflow: string, stepName: string, step: StepDef): string
  * the real graph is decided at runtime by `onTransit`, the engine cannot know
  * the exact edges, so it declares every step in the workflow — INCLUDING the
  * step itself, since a self-loop (re-run the same agent) is a structurally valid
- * retry target — plus the three terminal/park statuses. Step names are sorted so
- * the projection is byte-deterministic.
+ * retry target — plus the three terminal/park statuses. Step names preserve the
+ * workflow author's declaration order.
  */
 export function renderWorkflowInfo(wf: WorkflowDefinition): WorkflowInfo {
-  const stepNames = Object.keys(wf.steps).sort();
+  const stepNames = Object.keys(wf.steps);
   const statusTargets: StepTarget[] = [
     { status: "done" },
     { status: "cancel" },

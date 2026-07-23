@@ -20,9 +20,7 @@ import type { Store } from "../store/store.ts";
  * `renderWorkflowInfo`'s per-step `targets`, kept in one shape for both surfaces.
  */
 export function declaredTargets(wf: WorkflowDefinition): StepTarget[] {
-  const steps: StepTarget[] = Object.keys(wf.steps)
-    .sort()
-    .map((s) => ({ step: s }));
+  const steps: StepTarget[] = Object.keys(wf.steps).map((s) => ({ step: s }));
   return [...steps, { status: "done" }, { status: "cancel" }, { status: "human" }];
 }
 
