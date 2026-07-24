@@ -155,12 +155,13 @@ describe("renderWorkflowInfo (proto-v2 projection)", () => {
     const info = renderWorkflowInfo(
       wf("feature-dev", {
         description: "two-stepper",
+        firstStep: "recon",
         steps: { recon: agentStep(), design: agentStep(), approve: statusStep("human") },
       }),
     );
     expect(info.name).toBe("feature-dev");
     expect(info.description).toBe("two-stepper");
-    expect(info.first_step).toBe("dev");
+    expect(info.first_step).toBe("recon");
 
     expect(info.steps.map((s) => s.name)).toEqual(["recon", "design", "approve"]);
 
@@ -178,9 +179,9 @@ describe("renderWorkflowInfo (proto-v2 projection)", () => {
       { status: "human" },
     ]);
 
-    const accept = info.steps.find((s) => s.name === "approve")!;
+    const approve = info.steps.find((s) => s.name === "approve")!;
     // A statusStep renders its park/terminal status.
-    expect(accept.status).toBe("human");
+    expect(approve.status).toBe("human");
   });
 
   test("description is omitted when absent", () => {
