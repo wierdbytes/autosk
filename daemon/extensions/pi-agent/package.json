@@ -1,6 +1,6 @@
 {
   "name": "@autosk/pi-agent",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "autosk extension that drives `pi --mode rpc` as an agent (model/thinking/first_message, kickback loop, autosk_transit pi-tool bridge).",
   "license": "MIT",
   "author": "wierdbytes",

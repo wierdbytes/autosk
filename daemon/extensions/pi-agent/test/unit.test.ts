@@ -13,6 +13,7 @@ import {
   autoskEnv,
   buildInputCommand,
   buildPiCommand,
+  isBusyRejection,
   isStateMismatch,
   kickbackMessage,
   parseTarget,
@@ -24,7 +25,16 @@ import {
 } from "../src/index.ts";
 // `Coalescer` is an internal driver helper (not part of the extension's public
 // index surface); the test reaches into it directly to exercise the timer path.
-import { Coalescer } from "../src/driver.ts";
+import { Coalescer, type PiDriverHooks, type PiDriverOptions, type TurnEnd } from "../src/driver.ts";
+
+/**
+ * pi 0.82.1's verbatim rejection of a `prompt` issued while a run is active
+ * (`agent-session.js` `prompt()` → rpc-mode surfaces `e.message` unchanged).
+ * The tests use the REAL string so the matcher is exercised against what pi
+ * actually sends, not a paraphrase.
+ */
+const BUSY_REJECTION =
+  "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.";
 
 describe("parseTarget", () => {
   test("maps `to` to a step or terminal status", () => {
@@ -483,6 +493,569 @@ describe("Coalescer — trailing-edge timer (re-arm loop)", () => {
     expect(emitted).toEqual([1]);
     await sleep(WINDOW * 2); // the cancelled timer must NOT fire the dropped 2
     expect(emitted).toEqual([1]);
+  });
+});
+
+/**
+ * pi clears its run-active flag (`_isAgentRunActive`) only at `agent_settled` —
+ * AFTER the post-run phase (retry backoff, auto-compaction, queued-message
+ * drain), each round of which emits an EXTRA `agent_start`/`agent_end` pair. A
+ * `prompt` written in that window is rejected with "Agent is already
+ * processing" (#19). These tests pin the driver's mirror of that state machine.
+ */
+describe("PiDriver — the agent_settled gate (#19)", () => {
+  /** A fake child whose stdout, stdin writes and EXIT the test drives by hand. */
+  function fakeChildIO(): {
+    child: ChildHandle;
+    writes: Record<string, unknown>[];
+    emitStdout(line: string): void;
+    exit(code: number): void;
+  } {
+    let stdoutCb: ((l: string) => void) | null = null;
+    let exitResolve: ((v: { code: number | null }) => void) | null = null;
+    const exited = new Promise<{ code: number | null }>((r) => {
+      exitResolve = r;
+    });
+    const writes: Record<string, unknown>[] = [];
+    const stdin = {
+      write: async (bytes: Uint8Array) => {
+        for (const line of new TextDecoder().decode(bytes).split("\n")) {
+          if (line.trim() === "") continue;
+          writes.push(JSON.parse(line) as Record<string, unknown>);
+        }
+      },
+      close: async () => {},
+    } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+    const child: ChildHandle = {
+      stdin,
+      onStdout: (cb) => void (stdoutCb = cb),
+      onStderr: () => {},
+      kill: () => {},
+      exited,
+    };
+    return { child, writes, emitStdout: (l) => stdoutCb?.(l), exit: (code) => exitResolve?.({ code }) };
+  }
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+  const tick = (): Promise<void> => sleep(0);
+
+  function makePi(
+    opts: PiDriverOptions = {},
+    hooks: Partial<PiDriverHooks> = {},
+  ): {
+    f: ReturnType<typeof fakeChildIO>;
+    driver: PiDriver;
+    ctl: AbortController;
+    warnings: string[];
+  } {
+    const f = fakeChildIO();
+    const ctl = new AbortController();
+    const warnings: string[] = [];
+    // A grace far longer than any test's timeline unless a test overrides it: the
+    // default keeps the legacy feature-detect from firing mid-test.
+    const driver = new PiDriver(
+      f.child,
+      { onMessage: () => {}, onCustom: () => {}, signal: ctl.signal, warn: (m) => warnings.push(m), ...hooks },
+      { settleGraceMs: 10_000, promptRetryBackoffMs: 1, ...opts },
+    );
+    return { f, driver, ctl, warnings };
+  }
+
+  /** Feeds one pi event line. */
+  function ev(f: ReturnType<typeof fakeChildIO>, type: string): void {
+    f.emitStdout(JSON.stringify({ type }));
+  }
+  /** Acks the last written command with the given response. */
+  function ack(f: ReturnType<typeof fakeChildIO>, success: boolean, error?: string): void {
+    const last = f.writes.at(-1)!;
+    f.emitStdout(JSON.stringify({ type: "response", id: last.id, command: last.type, success, error }));
+  }
+  const prompts = (f: ReturnType<typeof fakeChildIO>): Record<string, unknown>[] =>
+    f.writes.filter((w) => w.type === "prompt");
+  /**
+   * Opens a prompt CYCLE the way production does — by having pi accept a
+   * `prompt`. A cycle is what a turn-end belongs to, so nothing is expected from
+   * `waitForTurnEnd` until one is open.
+   */
+  async function openCycle(f: ReturnType<typeof fakeChildIO>, driver: PiDriver, message = "go"): Promise<void> {
+    const p = driver.sendPrompt(message);
+    await tick();
+    ack(f, true);
+    await p;
+  }
+  /** Resolves to `"pending"` if `p` has not settled within `ms`. */
+  async function within<T>(p: Promise<T>, ms: number): Promise<T | "pending"> {
+    return Promise.race([p, sleep(ms).then(() => "pending" as const)]);
+  }
+  /** Polls until `cond()` holds; throws after `ms` so a regression fails loudly. */
+  async function waitUntil(cond: () => boolean, ms = 2000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error("waitUntil: timed out");
+      await sleep(2);
+    }
+  }
+
+  test("a prompt issued after agent_end is held until agent_settled, then accepted", async () => {
+    const { f, driver } = makePi();
+    ev(f, "agent_start");
+    ev(f, "agent_end"); // the response finished streaming — but pi is still running
+    const p = driver.sendPrompt("next");
+    await tick();
+    expect(prompts(f)).toHaveLength(0); // gated: nothing written into the window
+    ev(f, "agent_settled"); // pi's post-run phase is over — promptable again
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "prompt", message: "next" });
+    ack(f, true);
+    await p; // resolves — no "Agent is already processing"
+  });
+
+  test("exactly one turn-end per prompt cycle despite intra-cycle start/end rounds", async () => {
+    const { f, driver } = makePi();
+    await openCycle(f, driver); // the accepted prompt opens the cycle
+    ev(f, "agent_start"); // the model's turn
+    ev(f, "agent_end");
+    ev(f, "agent_start"); // pi's post-run compaction round (agent.continue())
+    ev(f, "agent_end");
+    ev(f, "agent_start"); // …and a retry round
+    ev(f, "agent_end");
+    ev(f, "agent_settled"); // the cycle boundary
+    expect(await driver.waitForTurnEnd()).toBe("ended");
+    // No second turn-end was queued by the extra rounds (it would burn a
+    // correction from the kickback budget).
+    expect(await within(driver.waitForTurnEnd(), 30)).toBe("pending");
+  });
+
+  test("a steer landing in the agent_end → agent_settled window travels as `steer`, not a prompt", async () => {
+    const { f, driver } = makePi();
+    ev(f, "agent_start");
+    ev(f, "agent_end"); // inside pi's post-run window: the run is still ACTIVE
+    const p = driver.input("steer", "FOCUS");
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "steer", message: "FOCUS" });
+    ack(f, true);
+    await p;
+  });
+
+  test("child exit releases the gate and the turn wait; sendPrompt fails fast with `pi exited`", async () => {
+    const { f, driver } = makePi();
+    ev(f, "agent_start"); // gate closed — a settled event would normally be needed
+    const turn = driver.waitForTurnEnd();
+    const p = driver.sendPrompt("next");
+    f.exit(1);
+    expect(await within(turn, 200)).toBe("exited");
+    expect(await within(p.then(() => "ok").catch((e: Error) => e.message), 200)).toContain("pi exited");
+    expect(driver.exitCode).toBe(1);
+  });
+
+  test("abort releases the gate and the turn wait (no hang on a killed pi)", async () => {
+    const { f, driver, ctl } = makePi();
+    ev(f, "agent_start");
+    const turn = driver.waitForTurnEnd();
+    const p = driver.sendPrompt("next");
+    ctl.abort();
+    expect(await within(turn, 200)).toBe("aborted");
+    expect(await within(driver.waitUntilSettled().then(() => "released"), 200)).toBe("released");
+    expect(await within(p.then(() => "ok").catch((e: Error) => e.message), 200)).toContain("pi aborted");
+  });
+
+  test("a residual `already processing` rejection re-closes the gate and retries on the real boundary", async () => {
+    const { f, driver } = makePi();
+    const p = driver.sendPrompt("go"); // pi is idle at construction — gate open
+    await tick();
+    expect(prompts(f)).toHaveLength(1);
+    ack(f, false, BUSY_REJECTION); // pi's own wording
+    // pi PROVED it is busy: the gate re-closes, so the retry waits for the real
+    // boundary instead of spinning on a fixed sleep.
+    await sleep(20);
+    expect(prompts(f)).toHaveLength(1);
+    ev(f, "agent_settled");
+    await tick();
+    expect(prompts(f)).toHaveLength(2);
+    ack(f, true);
+    await p;
+  });
+
+  test("the retry net is bounded: after maxPromptAttempts busy rejections the prompt throws", async () => {
+    // A short grace bounds the gate re-open the healing waits for (a legacy pi
+    // re-fires its verdict off the re-armed grace), so the whole budget runs in ms.
+    const { f, driver } = makePi({ maxPromptAttempts: 3, settleGraceMs: 10 });
+    const p = driver.sendPrompt("go");
+    const failed = p.then(() => "ok").catch((e: Error) => e.message);
+    for (let i = 0; i < 3; i++) {
+      await waitUntil(() => prompts(f).length === i + 1);
+      ack(f, false, BUSY_REJECTION);
+    }
+    expect(await within(failed, 500)).toContain("already processing");
+    expect(prompts(f)).toHaveLength(3); // bounded — no unbounded hammering
+  });
+
+  test("a non-busy rejection is NOT retried", async () => {
+    const { f, driver } = makePi();
+    const p = driver.sendPrompt("go");
+    const failed = p.then(() => "ok").catch((e: Error) => e.message);
+    await tick();
+    ack(f, false, "boom");
+    expect(await within(failed, 200)).toContain("boom");
+    expect(prompts(f)).toHaveLength(1);
+  });
+
+  test("legacy pi (no agent_settled) is feature-detected and falls back to the agent_end boundary", async () => {
+    const { f, driver, warnings } = makePi({ settleGraceMs: 30 });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end"); // this pi will never settle — the grace decides
+    expect(await within(driver.waitForTurnEnd(), 500)).toBe("ended");
+    expect(warnings.some((w) => w.includes("no agent_settled"))).toBe(true);
+    // The gate is open again, so a prompt goes out without waiting.
+    const p = driver.sendPrompt("next");
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "prompt", message: "next" });
+    ack(f, true);
+    await p;
+    // The verdict sticks: the NEXT cycle ends at agent_end immediately (no grace).
+    ev(f, "agent_start");
+    const turn2 = driver.waitForTurnEnd();
+    ev(f, "agent_end");
+    expect(await within(turn2, 10)).toBe("ended");
+  });
+
+  test("a late agent_settled after a legacy verdict heals the detection without a double turn-end", async () => {
+    const { f, driver } = makePi({ settleGraceMs: 20 });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    expect(await within(driver.waitForTurnEnd(), 500)).toBe("ended"); // legacy verdict
+    ev(f, "agent_settled"); // …a very slow pi settles after all
+    expect(await within(driver.waitForTurnEnd(), 30)).toBe("pending"); // no duplicate
+    // Back on the modern boundary: agent_end alone no longer ends the cycle.
+    await openCycle(f, driver, "next");
+    ev(f, "agent_start");
+    const turn2 = driver.waitForTurnEnd();
+    ev(f, "agent_end");
+    expect(await within(turn2, 60)).toBe("pending");
+    ev(f, "agent_settled");
+    expect(await within(turn2, 200)).toBe("ended");
+  });
+
+  test("a stray boundary event with no open cycle enqueues no phantom turn", async () => {
+    const { f, driver } = makePi();
+    ev(f, "agent_settled"); // e.g. a settled left over from pi's own startup
+    ev(f, "agent_end");
+    expect(await within(driver.waitForTurnEnd(), 30)).toBe("pending");
+  });
+
+  test("activity still reports idle at agent_end (the assistant stream is done)", async () => {
+    const activity: boolean[] = [];
+    const { f, driver } = makePi({}, { onActivity: (b) => activity.push(b) });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    expect(activity).toEqual([true, false]); // UI idles before pi settles
+    ev(f, "agent_settled");
+    const turns: TurnEnd[] = [await driver.waitForTurnEnd()];
+    expect(turns).toEqual(["ended"]);
+  });
+
+  test("a WRONG legacy verdict is un-learned: the busy rejection re-closes the gate and the late agent_settled lets the prompt through", async () => {
+    // A modern pi whose post-run phase stayed quiet longer than the grace (an
+    // unannounced pause) is mis-read as legacy — the gate re-opens while pi is
+    // still running. That must not fail the session (#19).
+    const { f, driver, warnings } = makePi({ settleGraceMs: 25 });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end"); // pi is compacting; no agent_settled for now
+    expect(await within(driver.waitForTurnEnd(), 500)).toBe("ended"); // wrong verdict
+
+    const sent = prompts(f).length; // the cycle-opening prompt
+    const p = driver.sendPrompt("kickback"); // the agent fires its kickback
+    const failed = p.then(() => "ok").catch((e: Error) => e.message);
+    await waitUntil(() => prompts(f).length === sent + 1);
+    ack(f, false, BUSY_REJECTION); // pi: still running
+    await tick();
+    expect(warnings.some((w) => w.includes("re-testing for agent_settled"))).toBe(true);
+
+    ev(f, "agent_settled"); // pi's post-run phase finally ends
+    await waitUntil(() => prompts(f).length === sent + 2);
+    ack(f, true);
+    expect(await within(failed, 500)).toBe("ok"); // the session survives
+    // Healed back to the modern boundary: agent_end alone no longer ends a cycle.
+    ev(f, "agent_start");
+    const turn2 = driver.waitForTurnEnd();
+    ev(f, "agent_end");
+    expect(await within(turn2, 60)).toBe("pending");
+    ev(f, "agent_settled");
+    expect(await within(turn2, 200)).toBe("ended");
+  });
+
+  test("an announced retry backoff (auto_retry_start.delayMs) extends the detect grace instead of tripping it", async () => {
+    // pi's stock retry settings sleep 2s/4s/8s between attempts, emitting only
+    // `auto_retry_start` — a quiet window that must not be read as "legacy".
+    const { f, driver } = makePi({ settleGraceMs: 20 });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    f.emitStdout(JSON.stringify({ type: "auto_retry_start", attempt: 1, delayMs: 120 }));
+    const turn = driver.waitForTurnEnd();
+    // Well past the bare grace, still no verdict: the announced sleep is waited out.
+    expect(await within(turn, 60)).toBe("pending");
+    ev(f, "agent_start"); // the retry round starts — pi was alive all along
+    ev(f, "agent_end");
+    ev(f, "agent_settled");
+    expect(await within(turn, 200)).toBe("ended");
+  });
+
+  test("a compaction suspends the detect grace until compaction_end (unbounded summarization call)", async () => {
+    const { f, driver } = makePi({ settleGraceMs: 20 });
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    ev(f, "compaction_start"); // an LLM summarization of unknown length
+    const turn = driver.waitForTurnEnd();
+    expect(await within(turn, 80)).toBe("pending"); // no verdict while it runs
+    ev(f, "compaction_end"); // the deadline is armed again from here
+    ev(f, "agent_settled");
+    expect(await within(turn, 200)).toBe("ended");
+  });
+
+  test("a whole cycle arriving in ONE stdout batch still produces its turn-end", async () => {
+    // pi acks the prompt and then streams the entire turn without yielding — the
+    // driver sees `response`, `agent_start`, `agent_end`, `agent_settled` back to
+    // back. Opening the cycle must therefore happen while the RESPONSE line is
+    // handled, not in a promise continuation that runs after the batch (which
+    // would swallow the turn-end and hang the agent's turn loop).
+    const { f, driver } = makePi();
+    const p = driver.sendPrompt("go");
+    await tick();
+    ack(f, true);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    ev(f, "agent_settled");
+    await p;
+    expect(await within(driver.waitForTurnEnd(), 200)).toBe("ended");
+  });
+
+  test("a busy rejection batched with the agent_settled that follows it does not stall the retry", async () => {
+    // pi rejects the prompt and settles a beat later, both in one stdout batch.
+    // The rejection must be applied in STREAM ORDER (before the settled line), or
+    // the healed "pi is busy" view would land on top of the fresh settled one and
+    // park the retry on a gate nothing will re-open.
+    const { f, driver } = makePi(); // grace 10s: a stall would be plainly visible
+    const p = driver.sendPrompt("go");
+    await tick();
+    ack(f, false, BUSY_REJECTION);
+    ev(f, "agent_settled");
+    await waitUntil(() => prompts(f).length === 2, 300); // retried at once
+    ack(f, true);
+    await p;
+  });
+
+  test("an accepted prompt closes the gate: pi is running before its agent_start arrives", async () => {
+    const { f, driver } = makePi();
+    await openCycle(f, driver); // accepted — pi's run-active flag is set
+    const second = driver.sendPrompt("too early");
+    await sleep(20);
+    expect(prompts(f)).toHaveLength(1); // held: no second prompt into a live run
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    ev(f, "agent_settled");
+    await waitUntil(() => prompts(f).length === 2);
+    ack(f, true);
+    await second;
+  });
+
+  test("against a MODERN pi a busy rejection waits for agent_settled for as long as it takes — no hammering", async () => {
+    // A real agent turn runs for MINUTES. Once this pi has proven it emits
+    // `agent_settled`, the gate's re-open is guaranteed (pi emits it from
+    // `_runAgentPrompt`'s finally; exit/abort release it too), so the wait must
+    // not be ceiling-timed — a timed retry would hammer a legitimately busy pi,
+    // burn the whole attempt budget and fail the session with the very error #19
+    // is about.
+    const { f, driver } = makePi({ settleGraceMs: 20, maxPromptAttempts: 3, promptRetryBackoffMs: 1 });
+    // One clean cycle → settleSupport = "modern".
+    await openCycle(f, driver);
+    ev(f, "agent_start");
+    ev(f, "agent_end");
+    ev(f, "agent_settled");
+    expect(await driver.waitForTurnEnd()).toBe("ended");
+
+    // A run started behind our back (e.g. a user followup that our idle view
+    // dispatched as a `prompt`), so the kickback is busy-rejected.
+    const sent = prompts(f).length;
+    const outcome = driver
+      .sendPrompt("kickback")
+      .then(() => "ok")
+      .catch((e: Error) => e.message);
+    await waitUntil(() => prompts(f).length === sent + 1);
+    ack(f, false, BUSY_REJECTION);
+
+    // Far past settleGraceMs and every backoff: still exactly ONE outstanding
+    // write, and the prompt has not failed.
+    await sleep(200);
+    expect(prompts(f)).toHaveLength(sent + 1);
+    expect(await within(outcome, 20)).toBe("pending");
+
+    ev(f, "agent_settled"); // the foreign run ends — pi is promptable again
+    await waitUntil(() => prompts(f).length === sent + 2);
+    ack(f, true);
+    expect(await within(outcome, 500)).toBe("ok");
+  });
+
+  test("the retry's ceiling timer is cancelled once the gate wins the race", async () => {
+    // The ceiling is `settleGraceMs + margin` — ten seconds in production — and
+    // fires long after sendPrompt returned, several per prompt. Track the LIVE
+    // (armed, never cleared) timers of exactly that duration.
+    const settleGraceMs = 200;
+    const promptRetryBackoffMs = 64;
+    const ceilingMs = settleGraceMs + promptRetryBackoffMs; // retryWaitFor(1)
+    const live = new Set<unknown>();
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    globalThis.setTimeout = ((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      const h = realSetTimeout(fn, ms, ...(rest as []));
+      if (ms === ceilingMs) live.add(h);
+      return h;
+    }) as typeof globalThis.setTimeout;
+    globalThis.clearTimeout = ((h: Parameters<typeof globalThis.clearTimeout>[0]) => {
+      live.delete(h);
+      realClearTimeout(h);
+    }) as typeof globalThis.clearTimeout;
+    try {
+      const { f, driver } = makePi({ settleGraceMs, promptRetryBackoffMs });
+      const p = driver.sendPrompt("go");
+      await waitUntil(() => prompts(f).length === 1);
+      ack(f, false, BUSY_REJECTION); // support is still `unknown` → ceiling armed
+      await waitUntil(() => live.size === 1);
+      ev(f, "agent_settled"); // the gate wins
+      await waitUntil(() => prompts(f).length === 2);
+      ack(f, true);
+      await p;
+      expect(live.size).toBe(0); // the loser was cancelled, not left burning
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+    }
+  });
+
+  test("a compaction outside a prompt cycle cannot CREATE a legacy verdict (pi's manual `compact`)", async () => {
+    // pi emits compaction_start/compaction_end for the MANUAL compact() command
+    // too, with no agent_end in sight. A post-run signal may only extend, suspend
+    // or resume a deadline an `agent_end` created — never invent one, or a legacy
+    // verdict (gate open + turn-end) would be reached from an event that says
+    // nothing about whether this pi emits `agent_settled`.
+    const { f, driver, warnings } = makePi({ settleGraceMs: 20 });
+    await openCycle(f, driver); // a cycle is open and pi is mid-turn
+    ev(f, "agent_start");
+    ev(f, "compaction_start");
+    ev(f, "compaction_end");
+    await sleep(100); // several graces
+    expect(warnings.some((w) => w.includes("no agent_settled"))).toBe(false);
+    expect(await within(driver.waitForTurnEnd(), 30)).toBe("pending"); // no phantom turn
+    // …and the gate stayed shut: pi is still running.
+    const sent = prompts(f).length;
+    void driver.sendPrompt("next").catch(() => {});
+    await sleep(30);
+    expect(prompts(f)).toHaveLength(sent);
+  });
+});
+
+describe("PiDriver.input — healing the run-state view from pi's rejections", () => {
+  /** The same hand-driven fake child as the gate suite. */
+  function fakeChildIO(): {
+    child: ChildHandle;
+    writes: Record<string, unknown>[];
+    emitStdout(line: string): void;
+  } {
+    let stdoutCb: ((l: string) => void) | null = null;
+    const writes: Record<string, unknown>[] = [];
+    const stdin = {
+      write: async (bytes: Uint8Array) => {
+        for (const line of new TextDecoder().decode(bytes).split("\n")) {
+          if (line.trim() === "") continue;
+          writes.push(JSON.parse(line) as Record<string, unknown>);
+        }
+      },
+      close: async () => {},
+    } as unknown as WritableStreamDefaultWriter<Uint8Array>;
+    const child: ChildHandle = {
+      stdin,
+      onStdout: (cb) => void (stdoutCb = cb),
+      onStderr: () => {},
+      kill: () => {},
+      exited: new Promise(() => {}),
+    };
+    return { child, writes, emitStdout: (l) => stdoutCb?.(l) };
+  }
+
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+  function makePi(): { f: ReturnType<typeof fakeChildIO>; driver: PiDriver } {
+    const f = fakeChildIO();
+    const driver = new PiDriver(
+      f.child,
+      { onMessage: () => {}, onCustom: () => {}, signal: new AbortController().signal },
+      { settleGraceMs: 10_000 },
+    );
+    return { f, driver };
+  }
+
+  function ack(f: ReturnType<typeof fakeChildIO>, success: boolean, error?: string): void {
+    const last = f.writes.at(-1)!;
+    f.emitStdout(JSON.stringify({ type: "response", id: last.id, command: last.type, success, error }));
+  }
+
+  test("a busy rejection teaches the driver pi IS running: the next input goes out as `follow_up` on the FIRST write", async () => {
+    const { f, driver } = makePi();
+    // Our view says idle (no agent_start seen), pi says otherwise.
+    const first = driver.input("followup", "ONE");
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "prompt", message: "ONE" });
+    ack(f, false, BUSY_REJECTION);
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "follow_up", message: "ONE" }); // retry shape
+    ack(f, true);
+    await first;
+
+    // The view is healed, so the SECOND input pays no double round-trip.
+    const before = f.writes.length;
+    const second = driver.input("followup", "TWO");
+    await tick();
+    expect(f.writes).toHaveLength(before + 1);
+    expect(f.writes.at(-1)).toMatchObject({ type: "follow_up", message: "TWO" });
+    ack(f, true);
+    await second;
+  });
+
+  test("a `not streaming` rejection teaches the opposite: the next input goes out as a `prompt` first try", async () => {
+    const { f, driver } = makePi();
+    f.emitStdout(JSON.stringify({ type: "agent_start" })); // believed streaming
+    const first = driver.input("steer", "ONE");
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "steer" });
+    ack(f, false, "not streaming (no active run)"); // pi raced us back to idle
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "prompt", message: "ONE" });
+    ack(f, true);
+    await first;
+
+    // Healed to idle — but the accepted prompt re-opened a run, so the next input
+    // is a `steer` again. (Both directions of the view are now pi's, not ours.)
+    const second = driver.input("steer", "TWO");
+    await tick();
+    expect(f.writes.at(-1)).toMatchObject({ type: "steer", message: "TWO" });
+    ack(f, true);
+    await second;
+  });
+});
+
+describe("isBusyRejection", () => {
+  test("matches pi's run-active phrasings only", () => {
+    expect(isBusyRejection(BUSY_REJECTION)).toBe(true); // pi 0.82.1, verbatim
+    expect(isBusyRejection("Agent is already processing a request")).toBe(true);
+    expect(isBusyRejection("agent already streaming (in_progress)")).toBe(true);
+    expect(isBusyRejection("not streaming (no active run)")).toBe(false);
+    expect(isBusyRejection("boom")).toBe(false);
+    expect(isBusyRejection(undefined)).toBe(false);
   });
 });
 

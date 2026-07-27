@@ -54,6 +54,12 @@ describe("engine — pi-agent over a stub pi", () => {
     to?: string;
     transitOnTurn?: string;
     maxCorrections?: number;
+    /**
+     * Delay (ms) the stub keeps its run ACTIVE after `agent_end` before emitting
+     * `agent_settled` — pi's post-run (compaction / retry / queued-drain) window,
+     * in which a `prompt` is rejected with "Agent is already processing" (#19).
+     */
+    settleMs?: number;
     /** Builds the workflow steps from the pi agent (the step key is its name). */
     steps?: (ag: AgentDefinition) => Record<string, StepDef>;
     firstStep?: string;
@@ -75,6 +81,7 @@ describe("engine — pi-agent over a stub pi", () => {
         scenario: opts.scenario,
         to: opts.to ?? "done",
         transitOnTurn: opts.transitOnTurn ? Number.parseInt(opts.transitOnTurn, 10) : 2,
+        settleMs: opts.settleMs ?? 0,
       }),
     );
     const { engine } = makeEngine();
@@ -137,6 +144,29 @@ describe("engine — pi-agent over a stub pi", () => {
     // The turn-2 prompt the stub echoed back is the corrective message, proving a
     // kickback was issued between the missed turn and the successful transit.
     expect(await transcript(p, sid)).toContain("correction attempt 1");
+  }, 20000);
+
+  /**
+   * Regression for #19: pi clears its run-active flag only at `agent_settled`,
+   * which lands AFTER `agent_end` (its post-run phase compacts / retries /
+   * drains queued messages first). The kickback prompt the agent fires at the
+   * turn boundary used to be written into that window and rejected with "Agent
+   * is already processing", failing the session. The driver now gates prompts on
+   * `agent_settled`, so the whole cycle completes. Fails against the old driver.
+   */
+  test("kickback survives pi's post-run window (agent_end → agent_settled delay, #19)", async () => {
+    const { p, taskId } = await start({
+      scenario: "kickback_then_transit",
+      to: "done",
+      transitOnTurn: "2",
+      settleMs: 300, // the stub rejects any prompt for 300ms after agent_end
+    });
+    await waitForComplete(p.store, taskId, "done", 15000);
+    const sid = p.store.sessions.sessionsForTask(taskId)[0]!.id;
+    const text = await transcript(p, sid);
+    expect(text).toContain("correction attempt 1"); // the kickback landed
+    expect(text).not.toContain("already processing"); // and was never rejected
+    expect(p.store.sessions.sessionsForTask(taskId)[0]!.status).toBe("done");
   }, 20000);
 
   test("exhaustion: never transiting parks the task (agent_did_not_transit)", async () => {

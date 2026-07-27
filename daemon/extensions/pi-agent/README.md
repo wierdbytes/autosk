@@ -72,6 +72,53 @@ On each `onRun` the agent:
 `onAbort` asks pi to wind down gracefully (the engine's abort signal already
 terminates the child).
 
+### Run state & turn boundaries (`agent_end` vs `agent_settled`)
+
+pi keeps ONE run-active flag for a whole `prompt()` cycle and rejects a fresh
+`{type:"prompt"}` with *"Agent is already processing"* while it is set. The flag
+goes up at `agent_start` and comes down only in `_runAgentPrompt`'s `finally`,
+which emits **`agent_settled`** — after pi's *post-run phase* (retry backoff,
+auto-compaction, queued-message drain), each round of which emits its own EXTRA
+`agent_start`/`agent_end` pair. So `agent_end` means "the assistant response
+finished streaming", NOT "pi is promptable again", and a kickback sent at
+`agent_end` can land in that window and fail the session
+([#19](https://github.com/wierdbytes/autosk/issues/19)).
+
+The driver therefore splits the two:
+
+| pi event        | driver reaction                                                                                          |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| `agent_start`   | `onActivity(true)`; pi is streaming, bare prompts are refused.                                             |
+| `agent_end`     | **presentation only** — flush partial snapshots, `onActivity(false)` (the chat UI goes idle).             |
+| `agent_settled` | **the turn boundary** — clear `streaming`, open the prompt gate, resolve exactly one `waitForTurnEnd()`. |
+
+What that means for anyone reading or reusing `PiDriver`:
+
+- **`waitForTurnEnd()` resolves once per PROMPT CYCLE**, at `agent_settled` — not
+  once per `agent_end` (its pre-0.1.5 semantics). A cycle is opened by an
+  *accepted* `prompt`, so the post-run phase's extra `agent_start`/`agent_end`
+  pairs can never enqueue a phantom turn-end — nor burn a `maxCorrections` slot.
+- **`sendPrompt()` waits for that gate** before writing. If pi still answers
+  "already processing", the driver treats the rejection as ground truth (pi IS
+  running), heals its view and re-waits for the real boundary rather than
+  sleeping a fixed amount.
+- **Steer / followup inside the window** dispatch as `steer` / `follow_up` (which
+  pi queues and drains post-run) instead of a doomed `prompt`, because the
+  driver's `streaming` flag now mirrors pi's `isStreaming` exactly.
+- **Legacy pi builds** that never emit `agent_settled` are feature-detected per
+  child: after a grace with no `agent_settled` the driver falls back to the old
+  `agent_end` boundary. The grace is extended by an announced
+  `auto_retry_start.delayMs` and suspended for a `compaction_start`…
+  `compaction_end` bracket, and a late `agent_settled` (or a busy rejection)
+  un-learns a wrong verdict.
+- **No hangs:** the gate and `waitForTurnEnd()` are released unconditionally on
+  child exit and on abort; a `sendPrompt` against a dead pi fails fast.
+
+pi's side of this contract is written up in
+[`docs/notes/pi-rpc-contract.md`](../../../docs/notes/pi-rpc-contract.md); the
+full rationale (and the exact pi source lines it rests on) lives in the
+`PiDriver` class doc comment in `src/driver.ts`.
+
 ## Interactive (chat) mode
 
 Besides backing a workflow step, this package's **default export** registers a
@@ -144,8 +191,10 @@ which TRANSPORT pi-tools uses:
 - `piAgent(options)` → `AgentDefinition`
 - `buildPiCommand(options, { interactive? })` (the `interactive` flag skips the
   injected transit extension; task/comment always come from `@autosk/pi-tools`),
-  `PiDriver`,
-  `parseTarget`, the prompt renderers
+  `PiDriver` (note the `waitForTurnEnd()` semantics above — one resolve per
+  prompt cycle, at `agent_settled`),
+  `parseTarget`, `buildInputCommand`, `isStateMismatch`, `isBusyRejection`,
+  the prompt renderers
   (`renderInitialPrompt`, `kickbackMessage`, `rejectionMessage`, `targetLabels`)
   — exported for tooling / tests.
 - default export — an extension factory that registers the named `"pi"` agent for

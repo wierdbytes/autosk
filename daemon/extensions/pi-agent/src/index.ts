@@ -28,6 +28,7 @@ export {
   parseTarget,
   buildInputCommand,
   isStateMismatch,
+  isBusyRejection,
   TRANSIT_TOOL_NAME,
   type TurnEnd,
 } from "./driver.ts";
