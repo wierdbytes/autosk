@@ -89,6 +89,9 @@
   gap: 2px;
 }
 .enroll-item {
+  /* overflow:hidden (for the ellipsis) zeroes the flex auto-min-size, so
+     without this the column squashes items instead of scrolling */
+  flex-shrink: 0;
   text-align: left;
   background: transparent;
   border: none;
