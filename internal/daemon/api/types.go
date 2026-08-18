@@ -112,6 +112,26 @@ const (
 	SessionBusy SessionActivity = "busy"
 )
 
+// Usage is authoritative token and cost accounting reported by an agent for a
+// completed provider turn, or the aggregate of those reports for one session.
+type Usage struct {
+	Input       int64     `json:"input"`
+	Output      int64     `json:"output"`
+	CacheRead   int64     `json:"cacheRead"`
+	CacheWrite  int64     `json:"cacheWrite"`
+	TotalTokens int64     `json:"totalTokens"`
+	Cost        UsageCost `json:"cost"`
+}
+
+// UsageCost is the monetary-cost portion of Usage.
+type UsageCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	Total      float64 `json:"total"`
+}
+
 // SessionMeta is one session's metadata (replaces the v1 Job). Listing a task's
 // sessions = filtering metas by task_id.
 type SessionMeta struct {
@@ -127,6 +147,7 @@ type SessionMeta struct {
 	Error     string          `json:"error,omitempty"`
 	StartedAt *time.Time      `json:"started_at"`
 	EndedAt   *time.Time      `json:"ended_at"`
+	Usage     *Usage          `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

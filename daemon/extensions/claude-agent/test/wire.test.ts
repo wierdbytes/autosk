@@ -134,8 +134,8 @@ describe("mapResultUsage", () => {
       usage: { input_tokens: 100, output_tokens: 50 },
     });
     expect(r.totalCostUsd).toBeCloseTo(0.0123);
-    expect(r.usage.totalTokens).toBe(150);
-    expect(r.usage.cost.total).toBeCloseTo(0.0123);
+    expect(r.usage?.totalTokens).toBe(150);
+    expect(r.usage?.cost.total).toBeCloseTo(0.0123);
     expect(r.isError).toBe(false);
     expect(r.subtype).toBe("success");
   });
@@ -144,6 +144,7 @@ describe("mapResultUsage", () => {
     const r = mapResultUsage({ subtype: "error_during_execution", is_error: true });
     expect(r.isError).toBe(true);
     expect(r.subtype).toBe("error_during_execution");
+    expect(r.usage).toBeNull();
   });
 });
 

@@ -44,6 +44,7 @@ import type {
   SpawnOptions,
   StepTarget,
   TranscriptMessage,
+  Usage,
   WorkflowDefinition,
 } from "@autosk/sdk";
 
@@ -334,6 +335,7 @@ export class SessionRuntime {
     const done = await this.project.store.sessions.patchMeta(this.id, {
       status: "done",
       ended_at: this.host.clock(),
+      usage: this.transcript.usageSummary(),
     });
     await this.host.notifyTaskChanged(this.project, this.taskId);
     this.host.emitSession(this.project, done, "done");
@@ -484,6 +486,7 @@ export class SessionRuntime {
       status: "failed",
       error,
       ended_at: this.host.clock(),
+      usage: this.transcript.usageSummary(),
     });
     this.host.emitSession(this.project, meta, "error");
     this.host.kickScan();
@@ -505,6 +508,7 @@ export class SessionRuntime {
     const meta = await this.project.store.sessions.patchMeta(this.id, {
       status: "aborted",
       ended_at: this.host.clock(),
+      usage: this.transcript.usageSummary(),
     });
     // An aborted session reads truer as `error` than `done` for the proto-v2
     // session-event mapping (ISSUE #9a).
@@ -525,6 +529,7 @@ export class SessionRuntime {
     const meta = await this.project.store.sessions.patchMeta(this.id, {
       status: "done",
       ended_at: this.host.clock(),
+      usage: this.transcript.usageSummary(),
     });
     this.host.emitSession(this.project, meta, "done");
     this.host.kickScan();
@@ -600,6 +605,7 @@ export class SessionRuntime {
       signal: this.controller.signal,
       log: {
         message: (m: TranscriptMessage) => this.transcript.message(m),
+        usage: (u: Usage | null) => this.transcript.usage(u),
         custom: (t: string, d: unknown) => this.transcript.custom(t, d),
       },
       // EPHEMERAL partial channel: routed through the same transcript serial

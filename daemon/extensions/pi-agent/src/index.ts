@@ -18,7 +18,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import type { AgentDefinition, AgentRunContext, AutoskAPI, StepTarget } from "@autosk/sdk";
+import type { AgentDefinition, AgentRunContext, AutoskAPI, StepTarget, TranscriptMessage } from "@autosk/sdk";
 
 import { PiDriver } from "./driver.ts";
 import { kickbackMessage, renderInitialPrompt, rejectionMessage } from "./prompt.ts";
@@ -176,7 +176,7 @@ export function piAgent(opts: PiAgentOptions = {}): AgentDefinition {
         : cmd;
       const child = ctx.spawn(argv, { cwd: ws.cwd, env });
       const driver = new PiDriver(child, {
-        onMessage: (m) => ctx.log.message(m),
+        onMessage: (m) => logMessage(ctx, m),
         onCustom: (t, d) => ctx.log.custom(t, d),
         // Stream in-progress assistant snapshots live (ephemeral; superseded by
         // the committed onMessage line).
@@ -291,7 +291,7 @@ async function runChat(ctx: AgentRunContext, opts: PiAgentOptions): Promise<void
   const cmd = buildPiCommand(opts, { interactive: true });
   const child = ctx.spawn(cmd, { cwd: ctx.cwd, env: autoskEnv(ctx) });
   const driver = new PiDriver(child, {
-    onMessage: (m) => ctx.log.message(m),
+    onMessage: (m) => logMessage(ctx, m),
     onCustom: (t, d) => ctx.log.custom(t, d),
     // Stream in-progress assistant snapshots live (ephemeral; superseded by the
     // committed onMessage line).
@@ -312,6 +312,11 @@ async function runChat(ctx: AgentRunContext, opts: PiAgentOptions): Promise<void
     liveSessions.delete(ctx.session.id);
     await driver.shutdown().catch(() => {});
   }
+}
+
+function logMessage(ctx: AgentRunContext, message: TranscriptMessage): void {
+  ctx.log.message(message);
+  if (message.role === "assistant") ctx.log.usage(message.usage);
 }
 
 /** Resolves when the abort signal fires (the user ended or aborted the session). */

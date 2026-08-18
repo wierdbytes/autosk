@@ -174,7 +174,7 @@ interface AgentRunContext {
 
   tasks: TasksAPI;                    // live task access (current/get/list/comments)
   workflows: WorkflowsAPI;            // live registry + current { workflow, step, targets }
-  log: TranscriptAPI;                 // pi-format transcript writer (message / custom)
+  log: TranscriptAPI;                 // transcript writer (message / usage / custom)
   partial(message: TranscriptMessage): void;  // ephemeral live snapshot (NOT persisted)
 
   comment(text: string): Promise<void>;    // shorthand: comment on the current task
@@ -198,7 +198,11 @@ interface AgentRunContext {
   early release; the engine also closes it on every settle, so no port leaks
   across steps.
 - **`log`** writes the pi-format transcript: `log.message(...)` for a pi message
-  entry, `log.custom(type, data)` for the generic logging channel.
+  entry, `log.custom(type, data)` for the opaque agent logging channel, and
+  `log.usage(usage)` for authoritative usage from one completed provider turn.
+  Pass `null` when a completed turn has no trustworthy usage. The engine writes
+  each report as `autosk:usage` and aggregates complete reports into terminal
+  `SessionMeta.usage`; one unavailable report makes the aggregate unavailable.
 - **`partial`** streams an in-progress assistant message snapshot to live
   subscribers. It is **ephemeral**: never written to the transcript, carries no
   line, never advances the line cursor, and is superseded by the next committed

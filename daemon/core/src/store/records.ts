@@ -20,6 +20,7 @@ import type {
   TaskStatus,
   SessionHeader,
   TranscriptLine,
+  Usage,
 } from "@autosk/sdk";
 
 import { isEmptyMetadata } from "./metadata.ts";
@@ -208,6 +209,7 @@ export function serializeSessionMeta(m: SessionMeta): string {
   if (m.error !== undefined) ordered.error = m.error;
   ordered.started_at = m.started_at;
   ordered.ended_at = m.ended_at;
+  if (m.usage !== undefined) ordered.usage = m.usage;
   return JSON.stringify(ordered, null, 2) + "\n";
 }
 
@@ -233,7 +235,68 @@ export function parseSessionMeta(text: string): SessionMeta {
   };
   if (raw.activity === "idle" || raw.activity === "busy") meta.activity = raw.activity;
   if (typeof raw.error === "string") meta.error = raw.error;
+  if (Object.hasOwn(raw, "usage")) meta.usage = parseUsage(raw.usage);
   return meta;
+}
+
+function parseUsage(value: unknown): Usage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const token = (candidate: unknown): number | null =>
+    typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+      ? candidate
+      : null;
+  const costValue = (candidate: unknown): number | null =>
+    typeof candidate === "number" && Number.isFinite(candidate) && candidate >= 0
+      ? candidate
+      : null;
+  const input = token(raw.input);
+  const output = token(raw.output);
+  const cacheRead = token(raw.cacheRead);
+  const cacheWrite = token(raw.cacheWrite);
+  const totalTokens = token(raw.totalTokens);
+  const costs = raw.cost;
+  if (
+    input === null ||
+    output === null ||
+    cacheRead === null ||
+    cacheWrite === null ||
+    totalTokens === null ||
+    !costs ||
+    typeof costs !== "object" ||
+    Array.isArray(costs)
+  ) {
+    return null;
+  }
+  const cost = costs as Record<string, unknown>;
+  const costInput = costValue(cost.input);
+  const costOutput = costValue(cost.output);
+  const costCacheRead = costValue(cost.cacheRead);
+  const costCacheWrite = costValue(cost.cacheWrite);
+  const costTotal = costValue(cost.total);
+  if (
+    costInput === null ||
+    costOutput === null ||
+    costCacheRead === null ||
+    costCacheWrite === null ||
+    costTotal === null
+  ) {
+    return null;
+  }
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens,
+    cost: {
+      input: costInput,
+      output: costOutput,
+      cacheRead: costCacheRead,
+      cacheWrite: costCacheWrite,
+      total: costTotal,
+    },
+  };
 }
 
 function isSessionStatus(s: unknown): s is SessionStatus {

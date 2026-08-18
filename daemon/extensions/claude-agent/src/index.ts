@@ -178,6 +178,7 @@ export function claudeAgent(opts: ClaudeAgentOptions = {}): AgentDefinition {
       const child = ctx.spawn(argv, { cwd: ws.cwd, env });
       const driver = new ClaudeDriver(child, {
         onMessage: (m) => ctx.log.message(m),
+        onUsage: (usage) => ctx.log.usage(usage),
         onCustom: (t, d) => ctx.log.custom(t, d),
         onPartial: (m) => ctx.partial(m),
         signal: ctx.signal,
@@ -290,6 +291,7 @@ async function runChat(ctx: AgentRunContext, opts: ClaudeAgentOptions): Promise<
   const child = ctx.spawn(cmd, { cwd: ctx.cwd, env: autoskEnv(ctx) });
   const driver = new ClaudeDriver(child, {
     onMessage: (m) => ctx.log.message(m),
+    onUsage: (usage) => ctx.log.usage(usage),
     onCustom: (t, d) => ctx.log.custom(t, d),
     onPartial: (m) => ctx.partial(m),
     signal: ctx.signal,

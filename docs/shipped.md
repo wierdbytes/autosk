@@ -340,7 +340,8 @@ Drives [`pi`](https://github.com/earendil-works/pi) (`pi --mode rpc`).
 `piAgent({...})` returns an `AgentDefinition` the engine runs for a step: it
 spawns pi, injects an `autosk_transit` pi-tool, seeds the step prompt, mirrors
 pi's transcript entries 1:1 (streaming in-progress snapshots via `ctx.partial`),
-observes the transit tool call, and runs a kickback/corrections loop. It backs
+reports assistant usage through `ctx.log.usage()`, observes the transit tool
+call, and runs a kickback/corrections loop. It backs
 all of [`feature-dev`](#autoskfeature-dev),
 [`feature-dev-docker`](#autoskfeature-dev-docker), and
 [`merge-to-current`](#autoskmerge-to-current). Full internals:
@@ -382,6 +383,9 @@ stream-json). `claudeAgent({...})` returns an `AgentDefinition`; it backs
 (`autosk ext add npm:@autosk/claude-agent`) and wire it into your own workflow in
 place of `piAgent({...})`. Full internals:
 [package README](../daemon/extensions/claude-agent/README.md).
+
+Each Claude `result` event supplies the authoritative per-turn report passed to
+`ctx.log.usage()`; a missing or incomplete report is recorded as unavailable.
 
 Its tool surface is the **per-session, host-side HTTP MCP server** the daemon
 mints (`ctx.newMCPServer()`), registered with Claude via an inline `--mcp-config`

@@ -7,6 +7,7 @@
  * by hand. All timestamps are RFC3339 UTC strings on the wire.
  */
 
+import type { Usage } from "./transcript.ts";
 import type { StepTarget } from "./workflow.ts";
 
 /** The five-status task enum, unchanged from v1 (plan §3.1). */
@@ -113,6 +114,12 @@ export interface SessionMeta {
   error?: string;
   started_at: string | null;
   ended_at: string | null;
+  /**
+   * Aggregated authoritative usage once the session is terminal. `null` means
+   * that no complete total is available; absent means the session is still
+   * live or predates usage accounting.
+   */
+  usage?: Usage | null;
 }
 
 /**

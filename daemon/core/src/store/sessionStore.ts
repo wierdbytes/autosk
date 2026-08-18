@@ -210,7 +210,7 @@ export class SessionStore {
   /** Patches a session meta (status/activity/error/timestamps). Returns the new meta. */
   async patchMeta(
     id: string,
-    patch: Partial<Pick<SessionMeta, "status" | "activity" | "error" | "started_at" | "ended_at">>,
+    patch: Partial<Pick<SessionMeta, "status" | "activity" | "error" | "started_at" | "ended_at" | "usage">>,
   ): Promise<SessionMeta> {
     return this.locks.run(`session::${id}`, async () => {
       const current = this.metaCache.get(id)?.value ?? (await this.getMeta(id));
@@ -237,7 +237,7 @@ export class SessionStore {
   async patchMetaIf(
     id: string,
     expect: SessionStatus,
-    patch: Partial<Pick<SessionMeta, "status" | "activity" | "error" | "started_at" | "ended_at">>,
+    patch: Partial<Pick<SessionMeta, "status" | "activity" | "error" | "started_at" | "ended_at" | "usage">>,
   ): Promise<{ meta: SessionMeta; applied: boolean }> {
     return this.locks.run(`session::${id}`, async () => {
       const current = this.metaCache.get(id)?.value ?? (await this.getMeta(id));

@@ -72,12 +72,14 @@ describe("ClaudeDriver — turn boundaries", () => {
     const f = fakeChild();
     const messages: TranscriptMessage[] = [];
     const customs: { type: string; data: unknown }[] = [];
+    const usages: unknown[] = [];
     const driver = new ClaudeDriver(f.child, {
       onMessage: (m) => messages.push(m),
+      onUsage: (usage) => usages.push(usage),
       onCustom: (t, d) => customs.push({ type: t, data: d }),
       signal: new AbortController().signal,
     });
-    return { f, driver, messages, customs };
+    return { f, driver, messages, customs, usages };
   }
 
   test("a `result` event ends the turn (await then emit)", async () => {
@@ -93,16 +95,33 @@ describe("ClaudeDriver — turn boundaries", () => {
     expect(await driver.waitForTurnEnd()).toBe("ended");
   });
 
-  test("`result` logs a custom usage entry and mirrors assistant messages", async () => {
-    const { f, driver, messages, customs } = makeDriver();
+  test("`result` reports authoritative usage and mirrors assistant messages", async () => {
+    const { f, driver, messages, customs, usages } = makeDriver();
     f.emitStdout(assistantEvent([{ type: "text", text: "hi" }], { usage: { input_tokens: 1, output_tokens: 1 } }));
-    f.emitStdout(resultEvent({ total_cost_usd: 0.5 }));
+    f.emitStdout(resultEvent({ total_cost_usd: 0.5, usage: { input_tokens: 7, output_tokens: 3 } }));
     await tick();
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({ role: "assistant", content: [{ type: "text", text: "hi" }] });
     const result = customs.find((c) => c.type === "claude-agent:result");
     expect(result).toBeDefined();
     expect((result!.data as { total_cost_usd: number }).total_cost_usd).toBe(0.5);
+    expect(usages).toEqual([
+      {
+        input: 7,
+        output: 3,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 10,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+      },
+    ]);
+  });
+
+  test("`result` reports unavailable usage instead of a synthetic zero", async () => {
+    const { f, usages } = makeDriver();
+    f.emitStdout(resultEvent({ usage: {} }));
+    await tick();
+    expect(usages).toEqual([null]);
   });
 });
 

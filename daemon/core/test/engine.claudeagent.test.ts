@@ -99,6 +99,7 @@ describe("engine — claude-agent over a stub claude", () => {
     const sessions = p.store.sessions.sessionsForTask(taskId);
     expect(sessions).toHaveLength(1);
     expect(sessions[0]!.status).toBe("done");
+    expect(sessions[0]!.usage).toMatchObject({ input: 1, output: 1, totalTokens: 2 });
   }, 20000);
 
   test("a sibling-step transit drives the next step", async () => {

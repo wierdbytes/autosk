@@ -538,6 +538,7 @@ export class Engine implements SessionHost {
         status: "failed",
         error: "daemon_restart",
         ended_at: this.clock(),
+        usage: null,
       });
       await this.appendRecoveryEntries(project, meta.id);
       // Interactive sessions have no task to park (v1: not auto-resumed after a

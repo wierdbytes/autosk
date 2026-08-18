@@ -178,6 +178,7 @@ export const AUTOSK_CUSTOM_TYPES = [
   "autosk:steer",
   "autosk:error",
   "autosk:session_end",
+  "autosk:usage",
 ] as const;
 
 export type AutoskCustomType = (typeof AUTOSK_CUSTOM_TYPES)[number];
@@ -207,6 +208,9 @@ export interface SessionEndData {
   error?: string;
 }
 
+/** Canonical per-turn usage reported through {@link TranscriptAPI.usage}. */
+export type UsageData = Usage | null;
+
 export interface TransitEntry extends TranscriptEntryBase {
   type: "custom";
   customType: "autosk:transit";
@@ -231,8 +235,14 @@ export interface SessionEndEntry extends TranscriptEntryBase {
   data: SessionEndData;
 }
 
+export interface UsageEntry extends TranscriptEntryBase {
+  type: "custom";
+  customType: "autosk:usage";
+  data: UsageData;
+}
+
 /** The union of engine structural entries. */
-export type EngineEntry = TransitEntry | SteerEntry | ErrorEntry | SessionEndEntry;
+export type EngineEntry = TransitEntry | SteerEntry | ErrorEntry | SessionEndEntry | UsageEntry;
 
 /** Any non-header transcript entry. */
 export type TranscriptEntry = MessageEntry | CustomEntry | EngineEntry;
