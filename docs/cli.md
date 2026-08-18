@@ -28,7 +28,7 @@ plumbing.
 
 | Flag | Effect |
 | --- | --- |
-| `--json` | Emit machine-readable JSON instead of the human table/key-value form. RFC3339 UTC timestamps; edges flattened to id strings. |
+| `--json` | Emit machine-readable JSON instead of the human form. `watch` uses JSON Lines; timestamps stay RFC3339 UTC. |
 | `-q`, `--quiet` | Suppress non-essential output. **Write** verbs print nothing on success; **read** verbs still print their result (you asked for it). |
 
 `--json` and `--quiet` are global — they work on any verb. A few verbs that only
@@ -80,7 +80,7 @@ Verbs split into three project-resolution behaviors:
 
 - **Read verbs** (`show`, `list`, `ready`, `next`, `dep list`, `comment list`,
   `metadata show`, `workflow …`, `session list/get/transcript`,
-  `project diagnostics`) require a **discoverable** `.autosk/` project (walk-up
+  `watch`, `project diagnostics`) require a **discoverable** `.autosk/` project (walk-up
   from the working directory). Missing project → hard error telling you to run
   `autosk init`.
 - **Write verbs** (`create`, `update`, `done`, `cancel`, `reopen`, `block`,
@@ -189,6 +189,63 @@ Print one task: the stored fields plus the derived `blocked` / `blocked_by` /
 `blocks` edges and `comment_count`. A missing id errors with
 `task not found: <id>`. Honors `--json`. (Examples above in
 [Global behavior](#human-vs-machine-output).)
+
+### `watch`
+
+```bash
+autosk watch <id> [--no-follow] [--json]
+```
+
+Print the current state of one task, then follow its live progress. The default
+timeline is intended for people; `--json` emits one complete JSON object per
+line for agents and scripts. The command reports:
+
+- status and workflow-step transitions, including self-loop retries;
+- blocker changes;
+- session starts and finishes, including the session id and outcome;
+- elapsed wall-clock time when a step finishes;
+- token totals on the session-finish line when authoritative usage is available,
+  or `tokens unavailable` / JSON `null` values otherwise.
+
+```text
+$ autosk watch ask-3f9b2c
+14:32:10  snapshot ask-3f9b2c status=work workflow=feature-dev step=dev sessions=019f…
+14:44:45  step     dev -> review (12m 35s)
+14:44:45  session  019f… finished: done (tokens unavailable)
+14:44:46  session  019a… started (step review)
+```
+
+The opening snapshot includes any queued/running session ids. After the
+snapshot, task changes come from the existing `task.subscribe` channel and
+session lifecycle changes from `session.subscribeProject`; there is no polling
+and no watch-specific daemon storage. When attaching mid-step, `watch` reads the
+current session transcript header for the durable step-start timestamp. This is
+a live stream, not retained task history: earlier events are not replayed.
+
+`--no-follow` prints only the current snapshot and exits. In follow mode the
+command exits successfully after a task reaches `done` or `cancel` and its live
+sessions finish. `Ctrl+C` also exits cleanly. An unknown task or a lost daemon
+connection is an error.
+
+JSON Lines events always contain `type`, `task_id`, and an RFC3339 UTC
+`timestamp`. Event-specific fields are:
+
+| `type` | Additional fields |
+| --- | --- |
+| `snapshot` | `title`, `status`, nullable `workflow` / `step`, `blocked`, `blocked_by`, `live_session_ids` |
+| `status_change` | `previous_status`, `status` |
+| `step_change` | nullable `workflow` / `previous_step` / `step` / `duration_seconds` |
+| `blocked_change` | `previous_blocked`, `blocked`, `blocked_by` |
+| `session_start` | `session_id`, nullable `step` |
+| `session_finish` | `session_id`, nullable `step`, `outcome`, nullable `error` and token counts |
+
+```json
+{"type":"step_change","task_id":"ask-3f9b2c","timestamp":"2026-08-18T12:44:45Z","workflow":"feature-dev","previous_step":"dev","step":"review","duration_seconds":755}
+```
+
+`watch` appears in root help and `autosk watch --help`. Cobra's bash, zsh,
+fish, and PowerShell completion generators include the command, its
+`--no-follow` flag, and task-id suggestions.
 
 ### `list` / `ls`
 

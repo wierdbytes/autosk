@@ -53,11 +53,28 @@ func streamDaemon(t *testing.T, frames []map[string]any) (*RPC, <-chan struct{})
 					return
 				}
 				var req struct {
-					ID uint64 `json:"id"`
+					ID     uint64 `json:"id"`
+					Method string `json:"method"`
 				}
 				_ = json.Unmarshal(line, &req)
 				enc := json.NewEncoder(c)
 				_ = enc.Encode(map[string]any{"id": req.ID, "result": map[string]any{"ok": true}})
+				// RPC.Watch multiplexes task/project/session lifecycle subscriptions
+				// on one connection and waits for every acknowledgement before it
+				// exposes the stream. SessionSubscribe still sends only one request.
+				if req.Method == "task.subscribe" {
+					for range 2 {
+						line, err := r.ReadBytes('\n')
+						if err != nil {
+							return
+						}
+						var additional struct {
+							ID uint64 `json:"id"`
+						}
+						_ = json.Unmarshal(line, &additional)
+						_ = enc.Encode(map[string]any{"id": additional.ID, "result": map[string]any{"ok": true}})
+					}
+				}
 				for _, f := range frames {
 					_ = enc.Encode(f)
 				}

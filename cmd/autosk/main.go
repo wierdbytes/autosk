@@ -49,6 +49,7 @@ func newRootCmd() *cobra.Command {
 		newEnrollCmd(),
 		newResumeCmd(),
 		newCommentCmd(),
+		newWatchCmd(),
 		newLazyCmd(),
 	)
 	return root

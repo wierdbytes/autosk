@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`autosk watch`** streams live task, step, blocker, and session progress (#18).
+
 ### Fixed
 - **pi-agent:** gate prompts on pi's `agent_settled`, ending "Agent is already processing" session failures (#19).
 - **daemon:** large task descriptions no longer corrupt a multibyte UTF-8 char at a transport chunk boundary (#15).
