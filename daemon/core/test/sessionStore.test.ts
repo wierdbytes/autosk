@@ -54,11 +54,20 @@ describe("SessionStore", () => {
       status: "failed",
       error: "boom",
       ended_at: "2026-01-01T00:00:02Z",
+      usage: {
+        input: 3,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 4,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
     });
     const failed = await sessions.getMeta(id);
     expect(failed?.status).toBe("failed");
     expect(failed?.error).toBe("boom");
     expect(failed?.ended_at).toBe("2026-01-01T00:00:02Z");
+    expect(failed?.usage?.totalTokens).toBe(4);
   });
 
   test("appendEntry + paged readTranscript (fromLine / limit / cursor)", async () => {

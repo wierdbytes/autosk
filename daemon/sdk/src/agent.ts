@@ -10,7 +10,7 @@
 
 import type { Comment, SessionActivity, TaskFilter, TaskView, WorkflowInfo } from "./types.ts";
 import type { StepTarget } from "./workflow.ts";
-import type { TranscriptMessage } from "./transcript.ts";
+import type { TranscriptMessage, Usage } from "./transcript.ts";
 
 /**
  * An agent the engine can run for a step (plan §3.4).
@@ -97,6 +97,12 @@ export interface WorkflowsAPI {
 export interface TranscriptAPI {
   /** Writes a pi message-schema entry. */
   message(message: TranscriptMessage): void;
+  /**
+   * Reports authoritative token usage for one completed provider turn.
+   * Reports are aggregated into the session metadata. Pass `null` when the
+   * provider completed a turn but did not supply trustworthy usage data.
+   */
+  usage(usage: Usage | null): void;
   /** Writes a `custom` entry — the generic agent logging channel. */
   custom(customType: string, data?: unknown): void;
 }

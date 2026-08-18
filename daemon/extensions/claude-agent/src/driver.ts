@@ -20,7 +20,7 @@
  *    server, drives `ctx.transit`).
  */
 
-import type { ChildHandle, StepTarget, TranscriptMessage } from "@autosk/sdk";
+import type { ChildHandle, StepTarget, TranscriptMessage, Usage } from "@autosk/sdk";
 
 import {
   mapAssistant,
@@ -36,6 +36,8 @@ export type TurnEnd = "ended" | "exited" | "aborted";
 export interface ClaudeDriverHooks {
   /** Mirror a message-schema entry into the transcript (`ctx.log.message`). */
   onMessage(message: TranscriptMessage): void;
+  /** Report authoritative usage from a completed Claude result. */
+  onUsage?(usage: Usage | null): void;
   /** Mirror a custom session entry into the transcript (`ctx.log.custom`). */
   onCustom(customType: string, data: unknown): void;
   /** The session's abort signal (`ctx.signal`). */
@@ -441,6 +443,7 @@ export class ClaudeDriver {
       subtype: usage.subtype,
       is_error: usage.isError,
     });
+    this.hooks.onUsage?.(usage.usage);
     if (usage.isError) {
       this.hooks.warn?.(`claude-agent: turn ended with error (subtype=${usage.subtype || "?"})`);
     }

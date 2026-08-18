@@ -10,6 +10,7 @@ import {
   type SteerEntry,
   type TranscriptLine,
   type TransitEntry,
+  type UsageEntry,
 } from "../src/index.ts";
 
 /** Parse a JSONL line and assert it round-trips byte-for-byte through the type. */
@@ -267,7 +268,26 @@ describe("engine structural entries (autosk:*)", () => {
     expect(parsed.data.status).toBe("done");
   });
 
-  test("isAutoskCustomType recognises exactly the four structural types", () => {
+  test("round-trips canonical usage and unavailable reports", () => {
+    const entry: UsageEntry = {
+      type: "custom",
+      id: "55555555",
+      timestamp: "2026-06-12T09:05:00Z",
+      customType: "autosk:usage",
+      data: {
+        input: 10,
+        output: 5,
+        cacheRead: 2,
+        cacheWrite: 1,
+        totalTokens: 15,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+      },
+    };
+    expect(roundTrip(entry).data?.totalTokens).toBe(15);
+    expect(roundTrip({ ...entry, data: null }).data).toBeNull();
+  });
+
+  test("isAutoskCustomType recognises exactly the engine-owned types", () => {
     for (const t of AUTOSK_CUSTOM_TYPES) {
       expect(isAutoskCustomType(t)).toBe(true);
     }
@@ -278,6 +298,7 @@ describe("engine structural entries (autosk:*)", () => {
       "autosk:steer",
       "autosk:error",
       "autosk:session_end",
+      "autosk:usage",
     ]);
   });
 });

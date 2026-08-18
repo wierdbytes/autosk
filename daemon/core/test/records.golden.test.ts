@@ -270,6 +270,33 @@ const GOLDEN_SESSION_FAILED_JSON = `{
 }
 `;
 
+const GOLDEN_SESSION_USAGE_JSON = `{
+  "id": "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+  "kind": "task",
+  "task_id": "ask-3f9b2c",
+  "workflow": "feature-dev",
+  "step": "dev",
+  "agent": "@autosk/pi-agent/dev",
+  "status": "done",
+  "started_at": "2026-06-12T09:00:00Z",
+  "ended_at": "2026-06-12T09:01:00Z",
+  "usage": {
+    "input": 10,
+    "output": 5,
+    "cacheRead": 2,
+    "cacheWrite": 1,
+    "totalTokens": 15,
+    "cost": {
+      "input": 0.1,
+      "output": 0.2,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0.3
+    }
+  }
+}
+`;
+
 describe("session meta golden", () => {
   test("queued meta: no error key, null timestamps", () => {
     expect(serializeSessionMeta(GOLDEN_SESSION_QUEUED)).toBe(GOLDEN_SESSION_QUEUED_JSON);
@@ -284,6 +311,24 @@ describe("session meta golden", () => {
       ended_at: "2026-06-12T09:01:00Z",
     };
     expect(serializeSessionMeta(failed)).toBe(GOLDEN_SESSION_FAILED_JSON);
+  });
+
+  test("terminal meta: canonical aggregate follows timestamps", () => {
+    const done: SessionMeta = {
+      ...GOLDEN_SESSION_QUEUED,
+      status: "done",
+      started_at: "2026-06-12T09:00:00Z",
+      ended_at: "2026-06-12T09:01:00Z",
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 2,
+        cacheWrite: 1,
+        totalTokens: 15,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0, cacheWrite: 0, total: 0.3 },
+      },
+    };
+    expect(serializeSessionMeta(done)).toBe(GOLDEN_SESSION_USAGE_JSON);
   });
 });
 

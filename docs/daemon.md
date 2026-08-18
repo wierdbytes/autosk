@@ -232,7 +232,9 @@ Sessions replace v1's "jobs".
 
 - **Meta** (`sessions/<id>.json`): `{ id, kind: task|interactive, task_id,
   workflow, step, agent, status: queued|running|done|failed|aborted,
-  activity?: idle|busy, error?, started_at, ended_at }`. `activity` is the live
+  activity?: idle|busy, error?, started_at, ended_at, usage? }`. Terminal
+  `usage` is the aggregate of authoritative `ctx.log.usage()` reports, or `null`
+  when a complete total is unavailable. `activity` is the live
   **turn** state (orthogonal to the lifecycle `status`): `busy` while the agent
   is streaming a turn, `idle` when it is waiting for the next user message. It is
   set for interactive (chat) sessions only and is absent on task sessions and
@@ -249,7 +251,8 @@ Sessions replace v1's "jobs".
   - **`custom` entries** — the generic agent logging channel.
   - **engine structural entries** — autosk-specific custom types the engine
     emits itself: `autosk:transit`, `autosk:steer`, `autosk:error`,
-    `autosk:session_end` — so a transcript is self-contained.
+    `autosk:session_end`, and canonical per-turn `autosk:usage` reports — so a
+    transcript is self-contained.
 
 There is **no retention/GC** in this version: session files accumulate, and
 cleanup is manual (`rm .autosk/sessions/…`).

@@ -226,7 +226,7 @@ function toolResultContent(content: unknown): TextContent[] {
 
 /** Run-level usage + cost extracted from a `result` event (for a custom log entry). */
 export interface ResultUsage {
-  usage: Usage;
+  usage: Usage | null;
   totalCostUsd: number;
   isError: boolean;
   subtype: string;
@@ -234,15 +234,28 @@ export interface ResultUsage {
 
 /** Maps a Claude `result` event's usage + `total_cost_usd` for a custom log entry. */
 export function mapResultUsage(event: Record<string, unknown>): ResultUsage {
-  const usage = mapUsage(isObject(event.usage) ? (event.usage as Record<string, unknown>) : undefined);
+  const rawUsage = isObject(event.usage) ? (event.usage as Record<string, unknown>) : undefined;
+  const usage = completeResultUsage(rawUsage);
   const totalCostUsd = num(event.total_cost_usd);
-  usage.cost.total = totalCostUsd;
+  if (usage) usage.cost.total = totalCostUsd;
   return {
     usage,
     totalCostUsd,
     isError: event.is_error === true,
     subtype: typeof event.subtype === "string" ? event.subtype : "",
   };
+}
+
+function completeResultUsage(raw: Record<string, unknown> | undefined): Usage | null {
+  if (!raw || !tokenCount(raw.input_tokens) || !tokenCount(raw.output_tokens)) return null;
+  for (const key of ["cache_read_input_tokens", "cache_creation_input_tokens"] as const) {
+    if (Object.hasOwn(raw, key) && !tokenCount(raw[key])) return null;
+  }
+  return mapUsage(raw);
+}
+
+function tokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function num(v: unknown): number {
