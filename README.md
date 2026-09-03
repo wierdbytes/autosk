@@ -146,6 +146,13 @@ few scripting recipes are in **[docs/cli.md](docs/cli.md)**. A taste:
    step) — picks up the task, runs the workflow, and either closes it to `done`
    or parks it to `human` for review.
 
+   Follow that task from a terminal or another agent with a human timeline or
+   a JSON Lines stream:
+   ```bash
+   autosk watch "$id"
+   autosk watch "$id" --json
+   ```
+
    `feature-dev` runs each agent step in its own git worktree (a per-task
    `worktreeSandbox()`), so the project root must be a git repo; a final
    `cleanup` step tears the worktree down on the way to `done`.

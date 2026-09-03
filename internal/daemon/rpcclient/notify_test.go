@@ -17,12 +17,15 @@ func noteFrame(method string, params map[string]any) map[string]any {
 // task.unsubscribe.
 func TestSubscribe_ForwardsNotifications(t *testing.T) {
 	srv := newStreamServer(t, func(enc *json.Encoder, subID uint64) {
-		// Subscribe ack (a plain response) — readLoop must ignore it.
+		// Acknowledge task/project/session subscriptions. Notifications arriving
+		// during this handshake must be buffered and forwarded in order.
 		_ = enc.Encode(map[string]any{"id": subID, "result": map[string]any{"subscribed": true}})
 		_ = enc.Encode(noteFrame("task-changed", map[string]any{
 			"root": "/repo", "task": map[string]any{"id": "ask-1"}}))
+		_ = enc.Encode(map[string]any{"id": subID + 1, "result": map[string]any{"subscribed": true}})
 		_ = enc.Encode(noteFrame("project-changed", map[string]any{
 			"project": map[string]any{"root": "/repo", "name": "repo"}}))
+		_ = enc.Encode(map[string]any{"id": subID + 2, "result": map[string]any{"subscribed": true}})
 		_ = enc.Encode(noteFrame("task-changed", map[string]any{
 			"root": "/repo", "task": map[string]any{"id": "ask-2"}}))
 	})
@@ -58,13 +61,9 @@ func TestSubscribe_ForwardsNotifications(t *testing.T) {
 		"server never received task.unsubscribe after Close")
 }
 
-// TestSubscribe_SelfReapsOnError asserts an error response to the subscribe
-// ends the stream (closes the channel) AND self-reaps the underlying connection
-// (readLoop's deferred Close) so the server observes the client dropping its
-// end. The context is long-lived (WithCancel, never expires) so the teardown is
-// driven solely by the error response, not by ctx expiry — mirroring
-// TestSessionSubscribe_SubscribeError.
-func TestSubscribe_SelfReapsOnError(t *testing.T) {
+// TestSubscribe_ReturnsHandshakeError asserts a failed subscription is returned
+// synchronously and the underlying connection is released.
+func TestSubscribe_ReturnsHandshakeError(t *testing.T) {
 	srv := newStreamServer(t, func(enc *json.Encoder, subID uint64) {
 		_ = enc.Encode(map[string]any{"id": subID, "error": map[string]any{
 			"code": CodeMethodNotFound, "message": "unknown method: task.subscribe"}})
@@ -73,24 +72,48 @@ func TestSubscribe_SelfReapsOnError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	stream, err := cli.Subscribe(ctx)
-	if err != nil {
-		t.Fatalf("Subscribe: %v", err)
+	if _, err := cli.Subscribe(ctx); err == nil {
+		t.Fatal("Subscribe succeeded, want handshake error")
 	}
-	// The channel closes without an external Close (error response ends it).
-	select {
-	case _, ok := <-stream.Events():
-		if ok {
-			t.Fatal("expected channel to close on subscribe error")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("stream did not close the channel after a subscribe error")
-	}
-	// The self-reap guard: readLoop's deferred Close releases the connection, so
-	// the server sees the client drop its end under a long-lived ctx.
 	select {
 	case <-srv.gone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("client did not self-reap the connection after a subscribe error (leak)")
+		t.Fatal("client did not release the connection after a subscribe error")
+	}
+}
+
+func TestSubscribeTaskProgress_UsesExistingChannels(t *testing.T) {
+	srv := newStreamServer(t, func(enc *json.Encoder, subID uint64) {
+		_ = enc.Encode(map[string]any{"id": subID, "result": map[string]any{"ok": true}})
+		_ = enc.Encode(noteFrame("task-changed", map[string]any{
+			"root": "/repo", "task": map[string]any{"id": "ask-1"}}))
+		_ = enc.Encode(map[string]any{"id": subID + 1, "result": map[string]any{"ok": true}})
+		_ = enc.Encode(noteFrame("session-changed", map[string]any{
+			"root": "/repo", "session": map[string]any{"id": "se-1", "task_id": "ask-1"}}))
+	})
+	cli := mustClient(t, srv.sock)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	stream, err := cli.SubscribeTaskProgress(ctx)
+	if err != nil {
+		t.Fatalf("SubscribeTaskProgress: %v", err)
+	}
+	for i, want := range []string{"task-changed", "session-changed"} {
+		select {
+		case note := <-stream.Events():
+			if note.Method != want {
+				t.Fatalf("event %d method = %q, want %q", i, note.Method, want)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s", want)
+		}
+	}
+	_ = stream.Close()
+	waitFor(t, 2*time.Second, func() bool {
+		return srv.sawMethod("task.unsubscribe") && srv.sawMethod("session.unsubscribeProject")
+	}, "progress stream did not send both unsubscribe requests")
+	if srv.sawMethod("project.subscribe") {
+		t.Fatal("progress stream unexpectedly subscribed to project changes")
 	}
 }
